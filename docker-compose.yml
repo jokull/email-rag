@@ -1,0 +1,95 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: email_rag
+      POSTGRES_USER: email_user
+      POSTGRES_PASSWORD: email_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./services/database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U email_user -d email_rag"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  imap-server:
+    build: ./services/imap-server
+    environment:
+      DATABASE_URL: postgresql://email_user:email_pass@postgres:5432/email_rag
+      IMAP_PORT: 1143
+      UPSTREAM_IMAP_HOST: ${IMAP_HOST}
+      UPSTREAM_IMAP_PORT: ${IMAP_PORT:-993}
+      UPSTREAM_IMAP_USER: ${IMAP_USER}
+      UPSTREAM_IMAP_PASS: ${IMAP_PASS}
+      UPSTREAM_IMAP_TLS: ${IMAP_TLS:-true}
+      SYNC_INTERVAL: ${SYNC_INTERVAL:-300s}
+      LOG_LEVEL: info
+    ports:
+      - "1143:1143"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ai-classifier:
+    build: ./services/ai-classifier
+    environment:
+      DATABASE_URL: postgresql://email_user:email_pass@postgres:5432/email_rag
+      LLM_MODEL: ${LLM_MODEL:-llama3.2:3b}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - llm_models:/root/.cache/llm
+    restart: unless-stopped
+
+  rag-pipeline:
+    build: ./services/rag-pipeline
+    environment:
+      DATABASE_URL: postgresql://email_user:email_pass@postgres:5432/email_rag
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+      CHUNK_SIZE: ${CHUNK_SIZE:-512}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-50}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - llm_models:/root/.cache/llm
+    restart: unless-stopped
+
+  api:
+    build: ./services/api
+    environment:
+      DATABASE_URL: postgresql://email_user:email_pass@postgres:5432/email_rag
+      PORT: 3000
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ui:
+    build: ./services/ui
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3000
+    ports:
+      - "3001:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  llm_models:
+
+networks:
+  default:
+    name: email-rag-network

@@ -1,0 +1,4 @@
+psycopg2-binary==2.9.7
+python-dotenv==1.0.0
+llm==0.16
+llm-sentence-transformers==0.3.0
