@@ -1,0 +1,41 @@
+{
+  "name": "email-rag",
+  "version": "1.0.0",
+  "description": "Intelligent email RAG system with AI classification and real-time sync",
+  "private": true,
+  "scripts": {
+    "dev:setup": "./scripts/dev-setup.sh",
+    "dev:reset": "./scripts/reset-dev.sh",
+    "dev:seed": "./scripts/seed-database.sh development",
+    "deploy:permissions": "./scripts/deploy-permissions.sh",
+    "deploy:permissions:prod": "./scripts/deploy-permissions.sh production",
+    "migrate:schema": "./scripts/migrate-schema.sh",
+    "migrate:schema:prod": "./scripts/migrate-schema.sh production",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down",
+    "docker:logs": "docker-compose logs -f",
+    "docker:build": "docker-compose build",
+    "services:install": "cd web && bun install",
+    "ui:dev": "cd web && bun run dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jokull/email-rag.git"
+  },
+  "keywords": [
+    "email",
+    "rag",
+    "ai",
+    "classification",
+    "zero",
+    "realtime",
+    "imap",
+    "postgres",
+    "embeddings"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

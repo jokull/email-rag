@@ -1,8 +1,11 @@
 version: '3.8'
 
 services:
+  # Database with pgvector for embeddings
   postgres:
     image: pgvector/pgvector:pg16
+    shm_size: 1g
+    user: postgres
     environment:
       POSTGRES_DB: email_rag
       POSTGRES_USER: email_user
@@ -12,83 +15,178 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./services/database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: |
+      postgres 
+      -c wal_level=logical
+      -c max_wal_senders=10 
+      -c max_replication_slots=5 
+      -c hot_standby=on 
+      -c hot_standby_feedback=on
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U email_user -d email_rag"]
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
-  imap-server:
-    build: ./services/imap-server
+  # IMAP sync service - lightweight, handles email ingestion only
+  imap-sync:
+    build: ./services/imap-sync
     environment:
       DATABASE_URL: postgresql://email_user:email_pass@postgres:5432/email_rag
-      IMAP_PORT: 1143
-      UPSTREAM_IMAP_HOST: ${IMAP_HOST}
-      UPSTREAM_IMAP_PORT: ${IMAP_PORT:-993}
-      UPSTREAM_IMAP_USER: ${IMAP_USER}
-      UPSTREAM_IMAP_PASS: ${IMAP_PASS}
-      UPSTREAM_IMAP_TLS: ${IMAP_TLS:-true}
+      EMAIL_STORE_PATH: /var/lib/email-store
+      # User-configurable IMAP settings
+      IMAP_HOST: ${IMAP_HOST:?IMAP_HOST is required}
+      IMAP_PORT: ${IMAP_PORT:-993}
+      IMAP_USER: ${IMAP_USER:?IMAP_USER is required}
+      IMAP_PASS: ${IMAP_PASS:?IMAP_PASS is required}
+      IMAP_TLS: ${IMAP_TLS:-true}
       SYNC_INTERVAL: ${SYNC_INTERVAL:-300s}
-      LOG_LEVEL: info
-    ports:
-      - "1143:1143"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-
-  ai-classifier:
-    build: ./services/ai-classifier
-    environment:
-      DATABASE_URL: postgresql://email_user:email_pass@postgres:5432/email_rag
-      LLM_MODEL: ${LLM_MODEL:-llama3.2:3b}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
-      - llm_models:/root/.cache/llm
+      - email_store:/var/lib/email-store
     restart: unless-stopped
 
-  rag-pipeline:
-    build: ./services/rag-pipeline
+  # Email scorer service - rapid Qwen-based triage and scoring
+  email-scorer:
+    build: ./services/email-scorer
     environment:
       DATABASE_URL: postgresql://email_user:email_pass@postgres:5432/email_rag
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
-      CHUNK_SIZE: ${CHUNK_SIZE:-512}
-      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-50}
+      # Lightweight Qwen-0.5B configuration for rapid scoring
+      QWEN_MODEL_PATH: /app/models/qwen-0.5b-q4_0.gguf
+      SCORING_INTERVAL: ${SCORING_INTERVAL:-5}
+      SCORING_BATCH_SIZE: ${SCORING_BATCH_SIZE:-10}
+      USE_METAL: ${USE_METAL:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
-      - llm_models:/root/.cache/llm
+      - llm_models:/app/models  # Shared Qwen model storage
+      - scorer_logs:/app/logs
+    ports:
+      - "8081:8081"
+    # Resource limits for scoring service
+    deploy:
+      resources:
+        limits:
+          memory: 1G  # Lighter memory usage for scoring
+        reservations:
+          memory: 512M
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8081/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  api:
-    build: ./services/api
+  # Content processor service - Unstructured.io + embeddings
+  content-processor:
+    build: ./services/content-processor
     environment:
       DATABASE_URL: postgresql://email_user:email_pass@postgres:5432/email_rag
-      PORT: 3000
-      NODE_ENV: production
+      # Content processing configuration
+      PROCESSING_INTERVAL: ${PROCESSING_INTERVAL:-10}
+      PROCESSING_BATCH_SIZE: ${PROCESSING_BATCH_SIZE:-5}
+      UNSTRUCTURED_STRATEGY: ${UNSTRUCTURED_STRATEGY:-by_title}
+      EMBEDDING_MODEL: sentence-transformers/all-MiniLM-L6-v2
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - content_logs:/app/logs
     ports:
-      - "3000:3000"
+      - "8082:8082"
+    # Resource limits for content processing
+    deploy:
+      resources:
+        limits:
+          memory: 2G  # More memory for Unstructured processing
+        reservations:
+          memory: 1G
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8082/health')"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+
+  # Legacy AI processor (to be phased out or repurposed)
+  ai-processor:
+    build: ./services/ai-processor
+    environment:
+      DATABASE_URL: postgresql://email_user:email_pass@postgres:5432/email_rag
+      # Qwen-0.5B configuration optimized for Mac mini M2 16GB
+      QWEN_MODEL_PATH: /app/models/qwen-0.5b-q4_0.gguf
+      LLM_BATCH_SIZE: ${LLM_BATCH_SIZE:-8}
+      CHUNK_SIZE_TOKENS: ${CHUNK_SIZE_TOKENS:-600}
+      PROCESSING_INTERVAL: ${PROCESSING_INTERVAL:-30}
+      # Memory management
+      MAX_CONCURRENT_REQUESTS: ${MAX_CONCURRENT_REQUESTS:-4}
+      KEEP_MODEL_LOADED: ${KEEP_MODEL_LOADED:-true}
+      USE_METAL: ${USE_METAL:-true}
+      # Classification thresholds
+      HUMAN_THRESHOLD: ${HUMAN_THRESHOLD:-0.7}
+      PERSONAL_THRESHOLD: ${PERSONAL_THRESHOLD:-0.5}
+      RELEVANCE_THRESHOLD: ${RELEVANCE_THRESHOLD:-0.6}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - llm_models:/app/models  # Store Qwen model here
+      - ai_logs:/app/logs
+    ports:
+      - "8080:8080"
+    # Resource limits for predictable memory usage
+    deploy:
+      resources:
+        limits:
+          memory: 1G  # Reduced since main processing moved to other services
+        reservations:
+          memory: 512M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Zero cache server for real-time UI sync
+  zero-cache:
+    image: rocicorp/zero:latest
+    environment:
+      ZERO_UPSTREAM_DB: postgresql://email_user:email_pass@postgres:5432/email_rag
+      ZERO_AUTH_SECRET: ${ZERO_AUTH_SECRET:?ZERO_AUTH_SECRET is required - generate with: openssl rand -base64 32}
+    ports:
+      - "4848:4848"
     depends_on:
       postgres:
         condition: service_healthy
     restart: unless-stopped
 
+  # UI service - lightweight React app
   ui:
-    build: ./services/ui
+    build: ./web
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:3000
+      VITE_PUBLIC_SERVER: http://localhost:4848
     ports:
       - "3001:3000"
     depends_on:
-      - api
+      - zero-cache
     restart: unless-stopped
 
 volumes:
   postgres_data:
-  llm_models:
+  llm_models:    # Qwen-0.5B model storage (shared across services)
+  email_store:   # Raw email storage for go-imap-sql  
+  ai_logs:       # Legacy AI processor logs
+  scorer_logs:   # Email scorer logs
+  content_logs:  # Content processor logs
 
 networks:
   default:

@@ -1,0 +1,41 @@
+{
+  "name": "email-rag-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bunx vite --port 3001",
+    "build": "bunx tsc && bunx vite build",
+    "format": "bunx biome check . --write",
+    "preview": "bunx vite preview",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "dependencies": {
+    "@rocicorp/zero": "^0.19.0",
+    "@tanstack/react-router": "^1.86.6",
+    "@tanstack/react-virtual": "^3.11.1",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.1.0",
+    "framer-motion": "^11.18.0",
+    "justd-icons": "^1.4.85",
+    "lucide-react": "^0.468.0",
+    "react": "19.1.0",
+    "react-aria-components": "^1.5.0",
+    "react-dom": "19.1.0",
+    "tailwind-merge": "^2.5.5",
+    "tailwind-variants": "^0.3.3",
+    "tailwindcss": "^3.4.17"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@tanstack/router-devtools": "^1.86.6",
+    "@tanstack/router-plugin": "^1.86.3",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react-swc": "^3.7.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vite-tsconfig-paths": "^5.1.4"
+  }
+}

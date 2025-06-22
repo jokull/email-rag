@@ -571,6 +571,13 @@ ALTER TABLE classifications ADD COLUMN human_score FLOAT DEFAULT 0.0 CHECK (huma
 ALTER TABLE classifications ADD COLUMN personal_score FLOAT DEFAULT 0.0 CHECK (personal_score >= 0.0 AND personal_score <= 1.0);
 ALTER TABLE classifications ADD COLUMN should_process BOOLEAN DEFAULT FALSE;
 
+-- Enhanced email scoring for new pipeline
+ALTER TABLE classifications ADD COLUMN sentiment_score FLOAT DEFAULT 0.5 CHECK (sentiment_score >= 0.0 AND sentiment_score <= 1.0);
+ALTER TABLE classifications ADD COLUMN importance_score FLOAT DEFAULT 0.0 CHECK (importance_score >= 0.0 AND importance_score <= 1.0);
+ALTER TABLE classifications ADD COLUMN commercial_score FLOAT DEFAULT 0.0 CHECK (commercial_score >= 0.0 AND commercial_score <= 1.0);
+ALTER TABLE classifications ADD COLUMN processing_priority INTEGER DEFAULT 0;
+ALTER TABLE classifications ADD COLUMN scorer_version VARCHAR(50) DEFAULT 'qwen-0.5b-v1';
+
 -- Create indexes for new tables
 CREATE INDEX idx_sender_rules_email_pattern ON sender_rules(email_pattern);
 CREATE INDEX idx_sender_rules_rule_type ON sender_rules(rule_type);
@@ -674,6 +681,342 @@ INSERT INTO user_preferences (preference_key, preference_value, description) VAL
 ('processing_priorities', '{"new_message_boost": 1000, "user_forced_boost": 5000, "whitelist_boost": 500}', 'Priority boosts for different scenarios'),
 ('ui_settings', '{"show_progress_bar": true, "auto_refresh_interval": 30, "items_per_page": 50}', 'UI behavior settings')
 ON CONFLICT (preference_key) DO NOTHING;
+
+-- Create cleaned_emails table for content cleaning results
+CREATE TABLE cleaned_emails (
+    id VARCHAR(255) PRIMARY KEY DEFAULT uuid_generate_v4()::text,
+    email_id VARCHAR(255) NOT NULL REFERENCES emails(id) ON DELETE CASCADE,
+    clean_content TEXT NOT NULL,
+    signature_removed TEXT DEFAULT '',
+    quotes_removed TEXT DEFAULT '',
+    original_length INTEGER NOT NULL,
+    cleaned_length INTEGER NOT NULL,
+    cleaning_confidence FLOAT NOT NULL CHECK (cleaning_confidence >= 0.0 AND cleaning_confidence <= 1.0),
+    cleaning_method VARCHAR(100) NOT NULL,
+    content_type VARCHAR(20) DEFAULT 'text' CHECK (content_type IN ('text', 'html')),
+    reduction_ratio FLOAT DEFAULT 0.0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(email_id)
+);
+
+-- Create conversations table for processed conversation threads
+CREATE TABLE conversations (
+    id VARCHAR(255) PRIMARY KEY DEFAULT uuid_generate_v4()::text,
+    thread_id VARCHAR(255) NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    participants TEXT[] NOT NULL,
+    message_count INTEGER NOT NULL,
+    conversation_type VARCHAR(50) NOT NULL,
+    threading_confidence FLOAT NOT NULL CHECK (threading_confidence >= 0.0 AND threading_confidence <= 1.0),
+    first_message_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    last_message_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    duration_days INTEGER DEFAULT 0,
+    temporal_patterns JSONB DEFAULT '{}'::jsonb,
+    conversation_flow JSONB DEFAULT '{}'::jsonb,
+    quality_metrics JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(thread_id)
+);
+
+-- Create conversation_turns table for individual conversation turns
+CREATE TABLE conversation_turns (
+    id VARCHAR(255) PRIMARY KEY DEFAULT uuid_generate_v4()::text,
+    conversation_id VARCHAR(255) NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    email_id VARCHAR(255) NOT NULL REFERENCES emails(id) ON DELETE CASCADE,
+    speaker_email VARCHAR(255) NOT NULL,
+    speaker_name VARCHAR(255),
+    turn_index INTEGER NOT NULL,
+    turn_type VARCHAR(50) NOT NULL,
+    clean_content TEXT NOT NULL,
+    word_count INTEGER DEFAULT 0,
+    temporal_context JSONB DEFAULT '{}'::jsonb,
+    speaker_metadata JSONB DEFAULT '{}'::jsonb,
+    content_analysis JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(conversation_id, turn_index),
+    UNIQUE(email_id)
+);
+
+-- Create indexes for new conversation tables
+CREATE INDEX idx_cleaned_emails_email_id ON cleaned_emails(email_id);
+CREATE INDEX idx_cleaned_emails_confidence ON cleaned_emails(cleaning_confidence);
+CREATE INDEX idx_cleaned_emails_method ON cleaned_emails(cleaning_method);
+
+CREATE INDEX idx_conversations_thread_id ON conversations(thread_id);
+CREATE INDEX idx_conversations_participants ON conversations USING GIN(participants);
+CREATE INDEX idx_conversations_type ON conversations(conversation_type);
+CREATE INDEX idx_conversations_confidence ON conversations(threading_confidence);
+CREATE INDEX idx_conversations_last_message ON conversations(last_message_date);
+
+CREATE INDEX idx_conversation_turns_conversation_id ON conversation_turns(conversation_id);
+CREATE INDEX idx_conversation_turns_email_id ON conversation_turns(email_id);
+CREATE INDEX idx_conversation_turns_speaker ON conversation_turns(speaker_email);
+CREATE INDEX idx_conversation_turns_turn_index ON conversation_turns(turn_index);
+CREATE INDEX idx_conversation_turns_type ON conversation_turns(turn_type);
+
+-- Create triggers for updated_at on new tables
+CREATE TRIGGER update_conversations_updated_at BEFORE UPDATE ON conversations
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Create notification triggers for real-time sync
+CREATE TRIGGER notify_conversations_change
+    AFTER INSERT OR UPDATE OR DELETE ON conversations
+    FOR EACH ROW EXECUTE FUNCTION notify_email_change();
+
+CREATE TRIGGER notify_conversation_turns_change
+    AFTER INSERT OR UPDATE OR DELETE ON conversation_turns
+    FOR EACH ROW EXECUTE FUNCTION notify_email_change();
+
+-- Function to get conversation summary for RAG chunking
+CREATE OR REPLACE FUNCTION get_conversation_summary(p_conversation_id VARCHAR(255))
+RETURNS TABLE(
+    conversation_type VARCHAR(50),
+    participants TEXT[],
+    total_turns INTEGER,
+    date_range TSTZRANGE,
+    combined_content TEXT,
+    speaker_turns JSONB
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        c.conversation_type,
+        c.participants,
+        c.message_count,
+        tstzrange(c.first_message_date, c.last_message_date, '[]'),
+        string_agg(ct.clean_content, E'\n\n' ORDER BY ct.turn_index) as combined_content,
+        jsonb_agg(
+            jsonb_build_object(
+                'speaker', ct.speaker_email,
+                'speaker_name', ct.speaker_name,
+                'turn_index', ct.turn_index,
+                'turn_type', ct.turn_type,
+                'content', ct.clean_content,
+                'word_count', ct.word_count
+            ) ORDER BY ct.turn_index
+        ) as speaker_turns
+    FROM conversations c
+    JOIN conversation_turns ct ON c.id = ct.conversation_id
+    WHERE c.id = p_conversation_id
+    GROUP BY c.id, c.conversation_type, c.participants, c.message_count, 
+             c.first_message_date, c.last_message_date;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to mark conversations ready for RAG processing  
+CREATE OR REPLACE FUNCTION mark_conversation_for_rag_processing(p_conversation_id VARCHAR(255))
+RETURNS VOID AS $$
+DECLARE
+    thread_record RECORD;
+BEGIN
+    -- Get the thread_id for this conversation
+    SELECT thread_id INTO thread_record
+    FROM conversations 
+    WHERE id = p_conversation_id;
+    
+    IF thread_record.thread_id IS NOT NULL THEN
+        -- Add to embedding queue with high priority
+        PERFORM add_to_processing_queue(thread_record.thread_id, 'embedding', 1000);
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger to automatically queue conversations for RAG processing when complete
+CREATE OR REPLACE FUNCTION auto_queue_conversation_for_rag()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Queue for RAG processing when conversation is created or updated
+    PERFORM mark_conversation_for_rag_processing(NEW.id);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER auto_queue_conversations_for_rag
+    AFTER INSERT OR UPDATE ON conversations
+    FOR EACH ROW EXECUTE FUNCTION auto_queue_conversation_for_rag();
+
+-- Create email_elements table for Unstructured partitioned content
+CREATE TABLE email_elements (
+    id VARCHAR(255) PRIMARY KEY DEFAULT uuid_generate_v4()::text,
+    email_id VARCHAR(255) NOT NULL REFERENCES emails(id) ON DELETE CASCADE,
+    element_id VARCHAR(255) NOT NULL, -- Unstructured element ID
+    element_type VARCHAR(50) NOT NULL, -- Title, NarrativeText, ListItem, etc.
+    content TEXT NOT NULL,
+    markdown_content TEXT, -- Clean markdown version of content
+    element_metadata JSONB DEFAULT '{}'::jsonb,
+    coordinates JSONB DEFAULT '{}'::jsonb, -- Bounding box info if available
+    page_number INTEGER DEFAULT 1,
+    sequence_number INTEGER NOT NULL, -- Order within email
+    parent_element_id VARCHAR(255), -- For hierarchical elements
+    extraction_confidence FLOAT DEFAULT 1.0,
+    processing_method VARCHAR(100) DEFAULT 'unstructured',
+    is_cleaned BOOLEAN DEFAULT FALSE, -- Whether content was cleaned of replies/signatures
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(email_id, element_id),
+    FOREIGN KEY (parent_element_id) REFERENCES email_elements(id) ON DELETE SET NULL
+);
+
+-- Create enhanced_embeddings table for element-level embeddings
+CREATE TABLE enhanced_embeddings (
+    id VARCHAR(255) PRIMARY KEY DEFAULT uuid_generate_v4()::text,
+    email_id VARCHAR(255) NOT NULL REFERENCES emails(id) ON DELETE CASCADE,
+    element_id VARCHAR(255) REFERENCES email_elements(id) ON DELETE CASCADE,
+    chunk_text TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    element_type VARCHAR(50), -- Copy from email_elements for quick filtering
+    embedding vector(384), -- sentence-transformers/all-MiniLM-L6-v2
+    chunk_metadata JSONB DEFAULT '{}'::jsonb,
+    semantic_parent VARCHAR(255), -- Reference to parent chunk for context
+    chunking_method VARCHAR(50) DEFAULT 'unstructured_semantic',
+    quality_score FLOAT DEFAULT 1.0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(email_id, chunk_index)
+);
+
+-- Create processing_metadata table for tracking processing quality
+CREATE TABLE processing_metadata (
+    id VARCHAR(255) PRIMARY KEY DEFAULT uuid_generate_v4()::text,
+    email_id VARCHAR(255) NOT NULL REFERENCES emails(id) ON DELETE CASCADE,
+    processing_stage VARCHAR(50) NOT NULL, -- 'scoring', 'partitioning', 'chunking', 'embedding'
+    processor_version VARCHAR(100) NOT NULL,
+    processing_time_ms INTEGER NOT NULL,
+    quality_metrics JSONB DEFAULT '{}'::jsonb,
+    error_details JSONB DEFAULT '{}'::jsonb,
+    resource_usage JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Create indexes for new tables
+CREATE INDEX idx_email_elements_email_id ON email_elements(email_id);
+CREATE INDEX idx_email_elements_type ON email_elements(element_type);
+CREATE INDEX idx_email_elements_sequence ON email_elements(sequence_number);
+CREATE INDEX idx_email_elements_parent ON email_elements(parent_element_id);
+
+CREATE INDEX idx_enhanced_embeddings_email_id ON enhanced_embeddings(email_id);
+CREATE INDEX idx_enhanced_embeddings_element_id ON enhanced_embeddings(element_id);
+CREATE INDEX idx_enhanced_embeddings_type ON enhanced_embeddings(element_type);
+CREATE INDEX idx_enhanced_embeddings_embedding ON enhanced_embeddings USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+CREATE INDEX idx_enhanced_embeddings_quality ON enhanced_embeddings(quality_score);
+
+CREATE INDEX idx_processing_metadata_email_id ON processing_metadata(email_id);
+CREATE INDEX idx_processing_metadata_stage ON processing_metadata(processing_stage);
+CREATE INDEX idx_processing_metadata_time ON processing_metadata(processing_time_ms);
+
+-- Enhanced processing queue with more detailed status tracking
+ALTER TABLE processing_queue ADD COLUMN content_type VARCHAR(50) DEFAULT 'text';
+ALTER TABLE processing_queue ADD COLUMN estimated_processing_time INTEGER DEFAULT 0;
+ALTER TABLE processing_queue ADD COLUMN actual_processing_time INTEGER DEFAULT 0;
+ALTER TABLE processing_queue ADD COLUMN quality_score FLOAT DEFAULT 0.0;
+ALTER TABLE processing_queue ADD COLUMN elements_extracted INTEGER DEFAULT 0;
+ALTER TABLE processing_queue ADD COLUMN chunks_created INTEGER DEFAULT 0;
+ALTER TABLE processing_queue ADD COLUMN embeddings_created INTEGER DEFAULT 0;
+
+-- Function to calculate email processing priority based on scores
+CREATE OR REPLACE FUNCTION calculate_processing_priority(
+    p_thread_id VARCHAR(255)
+) RETURNS INTEGER AS $$
+DECLARE
+    base_priority INTEGER;
+    importance_boost INTEGER;
+    commercial_penalty INTEGER;
+    age_factor INTEGER;
+    final_priority INTEGER;
+BEGIN
+    -- Base priority from existing calculation
+    SELECT EXTRACT(EPOCH FROM (NOW() - t.first_message_date))::INTEGER / 3600
+    INTO base_priority
+    FROM threads t WHERE t.id = p_thread_id;
+    
+    base_priority := GREATEST(0, 1000 - COALESCE(base_priority, 1000));
+    
+    -- Importance boost (0-500 points)
+    SELECT COALESCE(ROUND(c.importance_score * 500), 0)
+    INTO importance_boost
+    FROM classifications c WHERE c.thread_id = p_thread_id;
+    
+    -- Commercial penalty (-200 points for high commercial score)
+    SELECT COALESCE(ROUND(c.commercial_score * -200), 0)
+    INTO commercial_penalty
+    FROM classifications c WHERE c.thread_id = p_thread_id;
+    
+    -- Sentiment boost (negative sentiment = higher priority for customer service)
+    SELECT CASE 
+        WHEN c.sentiment_score < 0.3 THEN 300  -- Negative sentiment
+        WHEN c.sentiment_score > 0.7 THEN 100  -- Positive sentiment
+        ELSE 0
+    END INTO age_factor
+    FROM classifications c WHERE c.thread_id = p_thread_id;
+    
+    final_priority := base_priority + importance_boost + commercial_penalty + age_factor;
+    
+    RETURN GREATEST(final_priority, 0);
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to enqueue email for content processing based on scores
+CREATE OR REPLACE FUNCTION enqueue_content_processing(
+    p_thread_id VARCHAR(255)
+) RETURNS BOOLEAN AS $$
+DECLARE
+    should_process BOOLEAN;
+    calculated_priority INTEGER;
+    email_content_type VARCHAR(50);
+BEGIN
+    -- Check if email meets processing thresholds
+    SELECT 
+        (c.importance_score >= 0.3 OR 
+         c.human_score >= 0.7 OR 
+         c.sentiment_score <= 0.3 OR  -- Negative sentiment needs processing
+         c.commercial_score <= 0.5),  -- Non-commercial emails
+        CASE 
+            WHEN e.body_html IS NOT NULL AND LENGTH(e.body_html) > 100 THEN 'html'
+            ELSE 'text'
+        END
+    INTO should_process, email_content_type
+    FROM classifications c
+    JOIN threads t ON c.thread_id = t.id
+    JOIN emails e ON e.thread_id = t.id
+    WHERE c.thread_id = p_thread_id
+    ORDER BY e.date_received DESC
+    LIMIT 1;
+    
+    IF should_process THEN
+        calculated_priority := calculate_processing_priority(p_thread_id);
+        
+        INSERT INTO processing_queue (
+            thread_id, queue_type, priority, content_type
+        ) VALUES (
+            p_thread_id, 'content_processing', calculated_priority, email_content_type
+        ) ON CONFLICT (thread_id, queue_type) DO UPDATE SET
+            priority = GREATEST(processing_queue.priority, calculated_priority),
+            content_type = email_content_type,
+            status = CASE 
+                WHEN processing_queue.status = 'failed' THEN 'pending'
+                ELSE processing_queue.status
+            END,
+            updated_at = NOW();
+            
+        RETURN TRUE;
+    END IF;
+    
+    RETURN FALSE;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Update the auto-queue trigger to use new logic
+CREATE OR REPLACE FUNCTION auto_queue_after_classification()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Only queue for content processing if scores meet criteria
+    PERFORM enqueue_content_processing(NEW.thread_id);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger to queue for content processing after classification
+CREATE TRIGGER queue_content_processing_after_classification
+    AFTER INSERT OR UPDATE ON classifications
+    FOR EACH ROW EXECUTE FUNCTION auto_queue_after_classification();
 
 -- Insert default IMAP user for email sync
 INSERT INTO imap_users (username, password_hash) 
