@@ -45,8 +45,15 @@ This is a self-hosted email RAG system that syncs IMAP emails to PostgreSQL, pro
 
 ## Key Commands
 - Start services: `docker-compose up -d`
+- **Restart and wait for readiness**: `./scripts/restart_and_wait.sh` (recommended for development)
 - Format/lint/typecheck: `cd web && bun format lint:fix typecheck`
 - Build UI: `cd web && bun run build`
+
+## Development Scripts
+- `./scripts/restart_and_wait.sh` - Restarts Docker services and waits for full readiness using log heuristics
+- `./scripts/email_rag_overview.py` - System overview with statistics and health metrics
+- `./scripts/conversation_viewer.py` - View email threads with classification data
+- `./scripts/pipeline_monitor.py` - Monitor processing pipeline performance
 
 ## Database Schema
 Core tables: `emails`, `threads`, `conversations`, `conversation_turns`, `cleaned_emails`, `embeddings`, `classifications`
@@ -61,3 +68,6 @@ Core tables: `emails`, `threads`, `conversations`, `conversation_turns`, `cleane
 ## Package Management
 - Use uv for python packages
 - Modern Python tooling with uv for fast, reliable dependency management
+
+## Deployment Tips
+- Use container targeting when running the restart script

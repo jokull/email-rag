@@ -25,7 +25,12 @@
       "Bash(docker-compose:*)",
       "Bash(psql:*)",
       "WebFetch(domain:tristiks.com)",
-      "WebFetch(domain:fastapi.tiangolo.com)"
+      "WebFetch(domain:fastapi.tiangolo.com)",
+      "WebFetch(domain:www.getorchestra.io)",
+      "Bash(docker stats:*)",
+      "Bash(python scripts/email_rag_overview.py:*)",
+      "Bash(rg:*)",
+      "Bash(./scripts/restart_and_wait.sh:*)"
     ],
     "deny": []
   }

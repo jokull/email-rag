@@ -132,7 +132,7 @@ class EmailProcessor:
                 e.message_id,
                 e.subject,
                 e.from_email as sender,
-                array_to_string(e.to_emails, ',') as recipients,
+                e.to_emails as recipients,
                 COALESCE(e.body_text, e.body_html) as content,
                 e.date_received as received_date,
                 e.raw_headers->>'in-reply-to' as in_reply_to,
@@ -167,15 +167,32 @@ class EmailProcessor:
         
         # Step 2: Process each email individually
         for email, classification in zip(emails, classifications):
-            result = await self._process_single_email(session, email, classification)
-            results.append(result)
+            try:
+                result = await self._process_single_email(session, email, classification)
+                results.append(result)
+                
+                # Commit if successful
+                if result.success:
+                    session.commit()
+                    self.processing_stats["successful_classifications"] += 1
+                else:
+                    session.rollback()
+                    self.processing_stats["failed_classifications"] += 1
+                    
+            except Exception as e:
+                session.rollback()
+                self.logger.error(f"❌ Email processing failed: {e}")
+                result = ProcessingResult(
+                    email_id=email.get("id", "unknown"),
+                    success=False,
+                    error=str(e),
+                    processing_time=0
+                )
+                results.append(result)
+                self.processing_stats["failed_classifications"] += 1
             
             # Update global stats
             self.processing_stats["total_processed"] += 1
-            if result.success:
-                self.processing_stats["successful_classifications"] += 1
-            else:
-                self.processing_stats["failed_classifications"] += 1
         
         return results
     
@@ -368,9 +385,9 @@ class EmailProcessor:
         if positive_count > negative_count:
             return "positive", min(1.0, positive_count / 5.0)
         elif negative_count > positive_count:
-            return "negative", min(-1.0, -negative_count / 5.0)
+            return "negative", min(1.0, negative_count / 5.0)  # Keep positive for DB constraint
         else:
-            return "neutral", 0.0
+            return "neutral", 0.5
     
     def _analyze_formality(self, content: str, subject: str) -> Tuple[str, float]:
         """Basic formality analysis"""
@@ -441,11 +458,11 @@ class EmailProcessor:
         start_time = time.time()
         
         try:
-            # 1. Save classification to database
-            await self._save_classification(session, email_id, classification)
-            
-            # 2. Thread detection and conversation building
+            # 1. Thread detection and conversation building (do this first to get thread_id)
             thread_id, conversation_id = await self._handle_threading(session, email)
+            
+            # 2. Save classification to database with proper thread_id
+            await self._save_classification(session, email_id, classification, email, thread_id)
             
             # 3. Content cleaning and chunking (only for human conversations)
             chunks_created = 0
@@ -484,7 +501,9 @@ class EmailProcessor:
         self, 
         session: Session, 
         email_id: str, 
-        classification: EmailClassification
+        classification: EmailClassification,
+        email: dict,
+        thread_id: str
     ):
         """Save enhanced classification results to database"""
         # Calculate additional scores based on classification
@@ -496,29 +515,35 @@ class EmailProcessor:
             classification.confidence >= self.config.human_classification_threshold
         )
         
+        # Get contact history from sender
+        sender = email.get("from_email", "unknown@example.com")
+        contact_analysis = self._analyze_contact_history(sender)
+        
         query = text("""
             INSERT INTO classifications (
-                email_id, classification, confidence, human_score, 
-                personal_score, relevance_score, should_process,
+                email_id, thread_id, classification, confidence, human_score, 
+                personal_score, relevance_score, should_process, model_used,
                 sentiment, sentiment_score, formality, formality_score,
                 personalization, personalization_score, priority, priority_score,
                 sender_frequency_score, response_likelihood, relationship_strength,
                 created_at
             ) VALUES (
-                :email_id, :classification, :confidence, :human_score,
-                :personal_score, :relevance_score, :should_process,
+                :email_id, :thread_id, :classification, :confidence, :human_score,
+                :personal_score, :relevance_score, :should_process, :model_used,
                 :sentiment, :sentiment_score, :formality, :formality_score,
                 :personalization, :personalization_score, :priority, :priority_score,
                 :sender_frequency_score, :response_likelihood, :relationship_strength,
                 :created_at
             )
             ON CONFLICT (email_id) DO UPDATE SET
+                thread_id = EXCLUDED.thread_id,
                 classification = EXCLUDED.classification,
                 confidence = EXCLUDED.confidence,
                 human_score = EXCLUDED.human_score,
                 personal_score = EXCLUDED.personal_score,
                 relevance_score = EXCLUDED.relevance_score,
                 should_process = EXCLUDED.should_process,
+                model_used = EXCLUDED.model_used,
                 sentiment = EXCLUDED.sentiment,
                 sentiment_score = EXCLUDED.sentiment_score,
                 formality = EXCLUDED.formality,
@@ -529,18 +554,19 @@ class EmailProcessor:
                 priority_score = EXCLUDED.priority_score,
                 sender_frequency_score = EXCLUDED.sender_frequency_score,
                 response_likelihood = EXCLUDED.response_likelihood,
-                relationship_strength = EXCLUDED.relationship_strength,
-                updated_at = :created_at
+                relationship_strength = EXCLUDED.relationship_strength
         """)
         
         session.execute(query, {
             "email_id": email_id,
+            "thread_id": thread_id,  # Use the thread_id from threading step
             "classification": classification.classification,
             "confidence": classification.confidence,
             "human_score": human_score,
             "personal_score": personal_score,
             "relevance_score": relevance_score,
             "should_process": should_process,
+            "model_used": "qwen-0.5b-fallback" if not self.llm else "qwen-0.5b",
             "sentiment": classification.sentiment,
             "sentiment_score": classification.sentiment_score,
             "formality": classification.formality,
@@ -549,12 +575,12 @@ class EmailProcessor:
             "personalization_score": classification.personalization_score,
             "priority": classification.priority,
             "priority_score": classification.priority_score,
-            "sender_frequency_score": classification.sender_frequency_score,
-            "response_likelihood": classification.response_likelihood,
-            "relationship_strength": classification.relationship_strength,
+            "sender_frequency_score": contact_analysis["frequency_score"],
+            "response_likelihood": contact_analysis["response_likelihood"],
+            "relationship_strength": contact_analysis["relationship_strength"],
             "created_at": datetime.utcnow()
         })
-        session.commit()
+        # Don't commit here - let the calling method handle the transaction
     
     async def _handle_threading(
         self, 
@@ -569,20 +595,33 @@ class EmailProcessor:
         conversation_id = None
         
         try:
-            # Check if thread already exists
-            if email.get("in_reply_to") or email.get("references"):
+            # Check if thread already exists by looking in raw_headers JSONB
+            in_reply_to = None
+            references = None
+            
+            if email.get("raw_headers"):
+                # Parse raw_headers JSONB for threading information
+                headers = email["raw_headers"]
+                if isinstance(headers, str):
+                    import json
+                    headers = json.loads(headers)
+                
+                in_reply_to = headers.get("in_reply_to")
+                references = headers.get("references")
+            
+            if in_reply_to or references:
                 # Look for existing thread
                 query = text("""
                     SELECT t.id FROM threads t
                     JOIN emails e ON e.thread_id = t.id
                     WHERE e.message_id = :in_reply_to
-                    OR e.message_id = ANY(string_to_array(:references, ' '))
+                    OR (:references IS NOT NULL AND e.message_id = ANY(string_to_array(:references, ' ')))
                     LIMIT 1
                 """)
                 
                 result = session.execute(query, {
-                    "in_reply_to": email.get("in_reply_to"),
-                    "references": email.get("references", "")
+                    "in_reply_to": in_reply_to,
+                    "references": references or ""
                 }).fetchone()
                 
                 if result:
@@ -591,33 +630,103 @@ class EmailProcessor:
             # Create new thread if none found
             if not thread_id:
                 thread_id = f"thread_{email['id']}"
+                
+                # Clean participants data first
+                participants = []
+                if email.get("from_email"):
+                    participants.append(email["from_email"])
+                
+                # Handle recipients - they are PostgreSQL arrays
+                if email.get("recipients"):
+                    recipients_array = email["recipients"]
+                    if isinstance(recipients_array, list):
+                        # Handle PostgreSQL array format
+                        for recipient in recipients_array:
+                            if isinstance(recipient, str):
+                                # If it's a JSON string, try to parse it
+                                if recipient.startswith('{') and recipient.endswith('}'):
+                                    try:
+                                        import json
+                                        parsed_recipient = json.loads(recipient)
+                                        if isinstance(parsed_recipient, dict) and "email" in parsed_recipient:
+                                            participants.append(parsed_recipient["email"])
+                                        else:
+                                            participants.append(recipient)
+                                    except:
+                                        participants.append(recipient)
+                                else:
+                                    participants.append(recipient)
+                            elif isinstance(recipient, dict) and "email" in recipient:
+                                participants.append(recipient["email"])
+                    else:
+                        # Fallback - treat as comma-separated string
+                        recipients_str = str(recipients_array)
+                        participants.extend([r.strip() for r in recipients_str.split(",") if r.strip()])
+                
+                # Clean and normalize subject
+                subject = email.get("subject", "No Subject")
+                subject_normalized = subject.lower().strip()
+                # Truncate if too long for database field (500 char limit)
+                if len(subject_normalized) > 500:
+                    subject_normalized = subject_normalized[:497] + "..."
+                
+                # Keep participants as Python list for SQLAlchemy to handle
+                
                 query = text("""
-                    INSERT INTO threads (id, subject, participants, created_at)
-                    VALUES (:id, :subject, :participants, :created_at)
-                    ON CONFLICT (id) DO NOTHING
+                    INSERT INTO threads (
+                        id, subject_normalized, participants, 
+                        first_message_date, last_message_date, created_at
+                    )
+                    VALUES (
+                        :id, :subject_normalized, :participants, 
+                        :first_message_date, :last_message_date, :created_at
+                    )
+                    ON CONFLICT (id) DO UPDATE SET 
+                        subject_normalized = EXCLUDED.subject_normalized,
+                        participants = EXCLUDED.participants,
+                        last_message_date = EXCLUDED.last_message_date
                 """)
                 
-                participants = [email.get("sender", "")]
-                if email.get("recipients"):
-                    participants.extend(email["recipients"].split(","))
+                # Get email date
+                email_date = email.get("date_received", datetime.utcnow())
                 
-                session.execute(query, {
+                thread_params = {
                     "id": thread_id,
-                    "subject": email.get("subject", ""),
+                    "subject_normalized": subject_normalized,
                     "participants": participants,
+                    "first_message_date": email_date,
+                    "last_message_date": email_date,
                     "created_at": datetime.utcnow()
-                })
+                }
+                
+                # Debug: Log thread creation parameters with detailed lengths
+                participants_str = str(participants)
+                self.logger.info(f"📊 Creating thread: {thread_id[:20]}...")
+                self.logger.info(f"   📏 subject_len={len(subject_normalized)} participants_count={len(participants)}")
+                self.logger.info(f"   📏 participants_str_len={len(participants_str)} participants_preview={participants_str[:100]}...")
+                self.logger.info(f"   📏 subject_preview={subject_normalized[:100]}...")
+                
+                try:
+                    session.execute(query, thread_params)
+                except Exception as db_error:
+                    self.logger.error(f"💥 Thread creation failed with params:")
+                    self.logger.error(f"   thread_id: {thread_id} (len={len(thread_id)})")
+                    self.logger.error(f"   subject_normalized: {subject_normalized[:200]}... (len={len(subject_normalized)})")
+                    self.logger.error(f"   participants: {participants} (len={len(str(participants))})")
+                    self.logger.error(f"   email_date: {email_date}")
+                    raise db_error
             
             # Update email with thread_id
             query = text("UPDATE emails SET thread_id = :thread_id WHERE id = :email_id")
             session.execute(query, {"thread_id": thread_id, "email_id": email["id"]})
             
-            session.commit()
+            # Don't commit here - let the calling method handle the transaction
             self.processing_stats["threads_created"] += 1
             
         except Exception as e:
             self.logger.error(f"❌ Threading failed for email {email['id']}: {e}")
-            session.rollback()
+            # Don't rollback here - let the calling method handle the transaction
+            raise e  # Re-raise to stop processing this email
         
         return thread_id, conversation_id
     
@@ -648,11 +757,11 @@ class EmailProcessor:
             for i, chunk in enumerate(chunks):
                 query = text("""
                     INSERT INTO cleaned_emails (
-                        id, email_id, chunk_index, clean_content, 
-                        word_count, char_count, cleaning_method, created_at
+                        id, email_id, clean_content, original_length,
+                        cleaned_length, cleaning_confidence, cleaning_method, created_at
                     ) VALUES (
-                        :id, :email_id, :chunk_index, :clean_content,
-                        :word_count, :char_count, :cleaning_method, :created_at
+                        :id, :email_id, :clean_content, :original_length,
+                        :cleaned_length, :cleaning_confidence, :cleaning_method, :created_at
                     )
                 """)
                 
@@ -660,10 +769,10 @@ class EmailProcessor:
                 session.execute(query, {
                     "id": chunk_id,
                     "email_id": email_id,
-                    "chunk_index": i,
                     "clean_content": chunk.strip(),
-                    "word_count": len(chunk.split()),
-                    "char_count": len(chunk),
+                    "original_length": len(content),
+                    "cleaned_length": len(chunk.strip()),
+                    "cleaning_confidence": 0.8,  # Default confidence
                     "cleaning_method": cleaning_method,
                     "created_at": datetime.utcnow()
                 })

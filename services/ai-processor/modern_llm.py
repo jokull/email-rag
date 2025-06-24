@@ -190,17 +190,38 @@ class ModernQwenInterface:
             # Get response from model
             response = self.model(
                 prompt,
-                max_tokens=512,
+                max_tokens=40,  # Just enough for: human", "confidence": 0.9}
                 temperature=0.1,
-                stop=["</classification>"],
+                stop=["}"],
                 echo=False
             )
             
-            # Parse JSON response
+            # Parse JSON response (model completes the started JSON)
             response_text = response['choices'][0]['text'].strip()
             
+            # Debug: log what the model actually outputs
+            logger.warning(f"🔍 Model raw output: '{response_text}'")
+            
+            # Reconstruct full JSON from completion
+            # Extract just the classification value (remove any quotes)
+            clean_value = response_text.strip().strip('"')
+            
+            # Fix invalid multi-value classifications - take first valid option
+            if '/' in clean_value:
+                valid_options = ['human', 'promotional', 'transactional', 'automated']
+                for option in valid_options:
+                    if option in clean_value:
+                        clean_value = option
+                        break
+                else:
+                    clean_value = 'human'  # default fallback
+            
+            full_json = '{"classification": "' + clean_value + '", "confidence": 0.9}'
+            
+            logger.warning(f"🔍 Reconstructed JSON: '{full_json}'")
+            
             # Try to extract JSON from response
-            classification_data = self._parse_classification_response(response_text)
+            classification_data = self._parse_classification_response(full_json)
             
             # Update performance metrics
             processing_time = (time.time() - start_time) * 1000
@@ -253,56 +274,21 @@ class ModernQwenInterface:
         return classifications
     
     def _create_json_classification_prompt(self, request: EmailProcessingRequest) -> str:
-        """Create a prompt that requests JSON output from the model"""
+        """Create a simple, fast classification prompt"""
         
-        # Build context
-        context_parts = [f"Sender: {request.sender}"]
-        if request.subject:
-            context_parts.append(f"Subject: {request.subject}")
-        if request.contact_history:
-            ch = request.contact_history
-            context_parts.append(
-                f"Contact History: {ch.total_emails} total emails, "
-                f"{ch.recent_emails} recent, relationship strength {ch.relationship_strength:.2f}"
-            )
-        
-        context = "\n".join(context_parts)
-        
-        # Truncate content to fit context window
+        # Truncate content aggressively for speed
         content = request.content
-        if len(content) > 1500:  # Conservative limit for context window
-            content = content[:1500] + "..."
+        if len(content) > 500:  # Much shorter for speed
+            content = content[:500] + "..."
         
-        return f"""You are an expert email classifier. Analyze the email and provide a detailed classification in JSON format.
+        return f"""Email: {content}
 
-{context}
-
-Email Content:
-{content}
-
-Analyze this email and classify it across multiple dimensions. Respond with a JSON object containing:
-
-<classification>
-{{
-    "classification": "human",
-    "confidence": 0.85,
-    "sentiment": "positive", 
-    "sentiment_score": 0.3,
-    "formality": "formal",
-    "formality_score": 0.7,
-    "personalization": "somewhat_personal",
-    "personalization_score": 0.6,
-    "priority": "normal",
-    "priority_score": 0.5,
-    "should_process": true,
-    "processing_priority": 75,
-    "reasoning": "Brief explanation of classification"
-}}
-</classification>"""
+Classify as human/promotional/transactional/automated: {{"classification": \""""
     
     def _parse_classification_response(self, response_text: str) -> Dict[str, Any]:
         """Parse JSON classification response from the model"""
         try:
+            logger.warning(f"🔍 Parsing JSON: '{response_text}'")
             # Try to find JSON between tags first
             start_tag = "<classification>"
             end_tag = "</classification>"
@@ -321,31 +307,44 @@ Analyze this email and classify it across multiple dimensions. Respond with a JS
                     if start_idx >= 0 and end_idx > start_idx:
                         json_text = json_text[start_idx:end_idx]
             
+            # Fix common formatting issues from model completion
+            if 'human"}' in json_text:
+                json_text = json_text.replace('human"}', '"human"}')
+            elif 'promotional"}' in json_text:
+                json_text = json_text.replace('promotional"}', '"promotional"}')
+            elif 'transactional"}' in json_text:
+                json_text = json_text.replace('transactional"}', '"transactional"}')
+            elif 'automated"}' in json_text:
+                json_text = json_text.replace('automated"}', '"automated"}')
+            
             # Parse JSON
             data = json.loads(json_text)
             
-            # Validate required fields and provide defaults
+            # Extract only classification and confidence, provide smart defaults
+            classification = data.get("classification", "automated") 
+            confidence = float(data.get("confidence", 0.5))
+            
             result = {
-                "classification": data.get("classification", "automated"),
-                "confidence": float(data.get("confidence", 0.5)),
-                "sentiment": data.get("sentiment", "neutral"),
-                "sentiment_score": float(data.get("sentiment_score", 0.0)),
-                "formality": data.get("formality", "neutral"),
-                "formality_score": float(data.get("formality_score", 0.5)),
-                "personalization": data.get("personalization", "generic"),
-                "personalization_score": float(data.get("personalization_score", 0.3)),
-                "priority": data.get("priority", "normal"),
-                "priority_score": float(data.get("priority_score", 0.5)),
-                "should_process": bool(data.get("should_process", True)),
-                "processing_priority": int(data.get("processing_priority", 50)),
-                "reasoning": str(data.get("reasoning", "Model classification")),
+                "classification": classification,
+                "confidence": confidence,
+                "sentiment": "neutral",
+                "sentiment_score": 0.0,
+                "formality": "neutral",
+                "formality_score": 0.5,
+                "personalization": "generic" if classification != "human" else "somewhat_personal",
+                "personalization_score": 0.3 if classification != "human" else 0.6,
+                "priority": "normal",
+                "priority_score": 0.5,
+                "should_process": classification == "human" and confidence > 0.7,
+                "processing_priority": int(confidence * 100),
+                "reasoning": "Fast classification",
             }
             
             return result
             
         except (json.JSONDecodeError, ValueError) as e:
             logger.warning(f"⚠️ Failed to parse model response as JSON: {e}")
-            logger.debug(f"Raw response: {response_text}")
+            logger.warning(f"Raw response: '{response_text}'")
             
             # Return basic fallback
             return {

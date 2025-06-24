@@ -11,7 +11,7 @@ class LLMConfig:
     
     # Model configuration
     model_name: str = "qwen-0.5b"
-    model_path: str = "./models/qwen-0.5b-q4_0.gguf"  # 4-bit quantized GGUF format
+    model_path: str = "./models/qwen2.5-0.5b-instruct-q4_0.gguf"  # 4-bit quantized GGUF format
     model_size_mb: int = 395  # Disk size
     runtime_memory_mb: int = 1024  # Max RAM usage including context buffers
     
@@ -37,9 +37,11 @@ class LLMConfig:
     classification_only: bool = True  # Focus on classification, not generation
     
     # Prompt templates optimized for compact responses
-    classification_prompt: str = """Classify this email as one of: human, promotional, transactional, automated.
+    classification_prompt: str = """Classify this email. Return ONLY one word: human, promotional, transactional, or automated.
+
 Email: {content}
-Classification:"""
+
+Answer:"""
     
     threading_prompt: str = """Are these emails part of the same conversation thread? Answer: yes/no
 Email 1: {email1}
@@ -58,7 +60,7 @@ class ProcessorConfig:
     database_url: str = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/emailrag")
     
     # Processing settings
-    batch_size: int = 1  # Process emails in batches (minimal for debugging)
+    batch_size: int = 5  # Process emails in batches
     processing_interval: int = 60  # Seconds between processing runs
     max_retries: int = 3
     

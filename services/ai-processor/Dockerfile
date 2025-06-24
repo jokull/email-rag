@@ -36,4 +36,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 EXPOSE 8080
 
 # Start the service (no LLM model download for now)
-CMD ["python", "main.py"]
+CMD ["python", "main_queue.py"]
