@@ -7,10 +7,10 @@ import asyncio
 import logging
 import psutil
 import time
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 
-from llm_interface import QwenInterface
+from modern_llm import ModernQwenInterface
 from email_processor import EmailProcessor
 from embedding_service import EmbeddingService
 
@@ -22,7 +22,7 @@ class HealthMonitor:
     
     def __init__(
         self,
-        llm_interface: QwenInterface,
+        llm_interface: ModernQwenInterface,
         email_processor: EmailProcessor,
         embedding_service: EmbeddingService
     ):
@@ -65,7 +65,7 @@ class HealthMonitor:
             
             health_status = {
                 "healthy": overall_healthy,
-                "timestamp": current_time,
+                "timestamp": current_time.isoformat(),
                 "uptime_seconds": (current_time - self.start_time).total_seconds(),
                 "services": {
                     "llm_interface": llm_healthy,
@@ -77,7 +77,10 @@ class HealthMonitor:
             }
             
             # Store in history
-            self._update_health_history(health_status)
+            # Store timestamp as datetime for internal use
+            health_status_internal = health_status.copy()
+            health_status_internal["timestamp"] = current_time
+            self._update_health_history(health_status_internal)
             self.last_health_check = current_time
             
             return health_status
@@ -87,7 +90,7 @@ class HealthMonitor:
             return {
                 "healthy": False,
                 "error": str(e),
-                "timestamp": current_time
+                "timestamp": current_time.isoformat()
             }
     
     async def _get_system_health(self) -> Dict[str, Any]:
@@ -185,7 +188,7 @@ class HealthMonitor:
             health_status = await self.get_health_status()
             
             # Get LLM metrics
-            llm_metrics = self.llm.get_performance_metrics() if self.llm else {}
+            llm_metrics = self.llm.get_stats() if self.llm else {}
             
             # Get processor metrics
             processor_status = await self.processor.get_processing_status() if self.processor else {}

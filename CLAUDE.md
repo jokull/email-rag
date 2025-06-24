@@ -60,3 +60,4 @@ Core tables: `emails`, `threads`, `conversations`, `conversation_turns`, `cleane
 
 ## Package Management
 - Use uv for python packages
+- Modern Python tooling with uv for fast, reliable dependency management

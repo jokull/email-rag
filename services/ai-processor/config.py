@@ -58,12 +58,13 @@ class ProcessorConfig:
     database_url: str = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/emailrag")
     
     # Processing settings
-    batch_size: int = 50  # Process emails in batches
-    processing_interval: int = 30  # Seconds between processing runs
+    batch_size: int = 1  # Process emails in batches (minimal for debugging)
+    processing_interval: int = 60  # Seconds between processing runs
     max_retries: int = 3
     
     # Email filtering (pre-LLM heuristics to reduce load)
     min_email_length: int = 50  # Skip very short emails
+    max_email_length: int = 4000  # Skip extremely long emails
     skip_auto_replies: bool = True  # Skip obvious auto-replies
     skip_large_attachments: bool = True  # Skip emails with large attachments
     

@@ -4,24 +4,19 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"strconv"
 	"time"
 
-	"github.com/emersion/go-imap/server"
-	imapsql "github.com/foxcpp/go-imap-sql"
 	_ "github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 )
 
 type Config struct {
 	DatabaseURL     string
-	IMAPPort        string
 	UpstreamIMAP    UpstreamIMAPConfig
 	SyncInterval    time.Duration
 	LogLevel        string
-	EmailStorePath  string
 }
 
 type UpstreamIMAPConfig struct {
@@ -35,19 +30,17 @@ type UpstreamIMAPConfig struct {
 func getConfig() (*Config, error) {
 	config := &Config{
 		DatabaseURL:    os.Getenv("DATABASE_URL"),
-		IMAPPort:       getEnvDefault("IMAP_PORT", "1143"),
 		LogLevel:       getEnvDefault("LOG_LEVEL", "info"),
 		SyncInterval:   parseDuration(getEnvDefault("SYNC_INTERVAL", "300s")),
-		EmailStorePath: getEnvDefault("EMAIL_STORE_PATH", "/var/lib/email-store"),
 	}
 
 	// Upstream IMAP configuration
 	config.UpstreamIMAP = UpstreamIMAPConfig{
-		Host:     os.Getenv("UPSTREAM_IMAP_HOST"),
-		Port:     parseInt(getEnvDefault("UPSTREAM_IMAP_PORT", "993")),
-		Username: os.Getenv("UPSTREAM_IMAP_USER"),
-		Password: os.Getenv("UPSTREAM_IMAP_PASS"),
-		TLS:      getEnvDefault("UPSTREAM_IMAP_TLS", "true") == "true",
+		Host:     os.Getenv("IMAP_HOST"),
+		Port:     parseInt(getEnvDefault("IMAP_PORT", "993")),
+		Username: os.Getenv("IMAP_USER"),
+		Password: os.Getenv("IMAP_PASS"),
+		TLS:      getEnvDefault("IMAP_TLS", "true") == "true",
 	}
 
 	// Validate required fields
@@ -55,13 +48,13 @@ func getConfig() (*Config, error) {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
 	if config.UpstreamIMAP.Host == "" {
-		return nil, fmt.Errorf("UPSTREAM_IMAP_HOST is required")
+		return nil, fmt.Errorf("IMAP_HOST is required")
 	}
 	if config.UpstreamIMAP.Username == "" {
-		return nil, fmt.Errorf("UPSTREAM_IMAP_USER is required")
+		return nil, fmt.Errorf("IMAP_USER is required")
 	}
 	if config.UpstreamIMAP.Password == "" {
-		return nil, fmt.Errorf("UPSTREAM_IMAP_PASS is required")
+		return nil, fmt.Errorf("IMAP_PASS is required")
 	}
 
 	return config, nil
@@ -111,56 +104,10 @@ func main() {
 	}
 
 	logger := setupLogger(config.LogLevel)
-	logger.Info("Starting Email RAG IMAP Server")
+	logger.Info("Starting Email RAG IMAP Sync Service")
 
-	logger.Info("Configuring IMAP backend with PostgreSQL database")
-
-	// Create email file store
-	fileStore := &imapsql.FSStore{Root: config.EmailStorePath}
-	
-	// Ensure the email store directory exists
-	if err := os.MkdirAll(config.EmailStorePath, 0755); err != nil {
-		logger.Fatalf("Failed to create email store directory: %v", err)
-	}
-	
-	// Create IMAP backend using go-imap-sql with file store
-	backend, err := imapsql.New("postgres", config.DatabaseURL, fileStore, &imapsql.Opts{
-		// Use PostgreSQL-specific options
-		MaxConns:        10,
-		MaxIdleConns:    5,
-		ConnMaxLifetime: time.Hour,
-		
-		// Enable compression for better performance
-		CompressAlgo: imapsql.CompressionNone,
-		
-		// Use random UIDVALIDITY generation
-		PRNG: nil,
-	})
-	if err != nil {
-		logger.Fatalf("Failed to create IMAP backend: %v", err)
-	}
-	defer backend.Close()
-
-	// Create IMAP server
-	imapServer := server.New(backend)
-	imapServer.Addr = ":" + config.IMAPPort
-	imapServer.ErrorLog = logger.StandardLogger()
-
-	// Enable IMAP extensions
-	imapServer.Enable(server.EnableIDLE, server.EnableMove, server.EnableSpecialUse)
-
-	logger.Infof("IMAP server listening on port %s", config.IMAPPort)
-
-	// Start email synchronization in background
-	go startEmailSync(config, logger)
-
-	// Start IMAP server
-	listener, err := net.Listen("tcp", imapServer.Addr)
-	if err != nil {
-		logger.Fatalf("Failed to start IMAP server: %v", err)
-	}
-
-	logger.Fatal(imapServer.Serve(listener))
+	// Start email synchronization
+	startEmailSync(config, logger)
 }
 
 func startEmailSync(config *Config, logger *logrus.Logger) {

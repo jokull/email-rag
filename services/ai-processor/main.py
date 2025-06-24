@@ -34,13 +34,13 @@ from datetime import datetime, timedelta
 
 # Import our consolidated modules
 from config import get_config, LLMConfig, ProcessorConfig
-from llm_interface import QwenInterface, create_qwen_interface
+from modern_llm import ModernQwenInterface
 from email_processor import EmailProcessor, ProcessingResult
 from embedding_service import EmbeddingService
 from health_monitor import HealthMonitor
 
 # Global instances
-llm_interface: Optional[QwenInterface] = None
+llm_interface: Optional[ModernQwenInterface] = None
 email_processor: Optional[EmailProcessor] = None
 embedding_service: Optional[EmbeddingService] = None
 health_monitor: Optional[HealthMonitor] = None
@@ -56,7 +56,7 @@ async def setup_services():
     global llm_interface, email_processor, embedding_service, health_monitor
     global database_engine, SessionLocal, llm_config, processor_config
     
-    logging.info("🚀 Starting AI Processor - Qwen-0.5B on Mac mini M2")
+    logging.info("🚀 Starting Email Threading & Cleaning Service (with Qwen)")
     
     # Load configuration
     llm_config, processor_config = get_config()
@@ -65,28 +65,43 @@ async def setup_services():
     database_engine = create_engine(processor_config.database_url)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=database_engine)
     
-    # Initialize LLM interface (this loads and warms the model)
-    logging.info("🧠 Initializing Qwen-0.5B model...")
-    llm_interface = create_qwen_interface(llm_config)
+    # Try to initialize LLM interface
+    llm_interface = None
+    fallback_mode = os.getenv("FALLBACK_TO_BASIC_CLASSIFICATION", "false").lower() == "true"
+    disable_llm = os.getenv("DISABLE_LLM_INIT", "false").lower() == "true"
     
-    # Wait for model to warm up
-    model_ready = False
-    max_retries = 30
-    for i in range(max_retries):
-        if await llm_interface.health_check():
-            model_ready = True
-            break
-        logging.info(f"⏳ Waiting for model to load... ({i+1}/{max_retries})")
-        await asyncio.sleep(2)
-    
-    if not model_ready:
-        raise RuntimeError("Failed to load Qwen-0.5B model")
-    
-    logging.info("✅ Qwen-0.5B model loaded and ready")
+    if disable_llm:
+        logging.info("🔧 LLM initialization disabled for debugging")
+        llm_interface = None
+    else:
+        try:
+            logging.info("🧠 Initializing Modern Qwen-0.5B interface...")
+            llm_interface = ModernQwenInterface(llm_config, processor_config)
+            
+            # Initialize the model
+            model_ready = await llm_interface.initialize()
+            
+            if model_ready:
+                logging.info("✅ Modern Qwen-0.5B interface loaded and ready")
+            else:
+                raise RuntimeError("Model failed to initialize")
+                
+        except Exception as e:
+            if fallback_mode:
+                logging.warning(f"⚠️ Qwen model failed to load: {e}")
+                logging.info("📧 Falling back to basic classification (threading + Talon cleaning only)")
+                llm_interface = None
+            else:
+                raise RuntimeError(f"Failed to load Qwen-0.5B model: {e}")
     
     # Initialize other services
-    embedding_service = EmbeddingService(processor_config)
-    email_processor = EmailProcessor(llm_interface, embedding_service, processor_config)
+    try:
+        embedding_service = EmbeddingService(processor_config)
+    except Exception as e:
+        logging.warning(f"⚠️ Embedding service failed to initialize: {e}")
+        embedding_service = None
+        
+    email_processor = EmailProcessor(llm_interface, embedding_service, processor_config, SessionLocal)
     health_monitor = HealthMonitor(llm_interface, email_processor, embedding_service)
     
     logging.info("🎯 All AI services initialized successfully")
@@ -152,6 +167,37 @@ async def get_metrics():
     
     return await health_monitor.get_detailed_metrics()
 
+# Email cleaning test endpoint (using existing metrics route pattern)
+@app.post("/metrics/clean")
+async def test_email_cleaning(content: Dict[str, Any]):
+    """Test email cleaning functionality"""
+    if not email_processor:
+        raise HTTPException(status_code=503, detail="Email processor not ready")
+    
+    raw_content = content.get("content", "")
+    if not raw_content:
+        raise HTTPException(status_code=400, detail="Content required")
+    
+    try:
+        # Test our tiered cleaning approach
+        cleaned = await email_processor._clean_with_tiered_approach(raw_content)
+        method_used = getattr(email_processor, '_last_cleaning_method', 'unknown')
+        
+        return {
+            "success": True,
+            "original_length": len(raw_content),
+            "cleaned_length": len(cleaned),
+            "cleaned_content": cleaned,
+            "cleaning_method": method_used,
+            "reduction_ratio": round((len(raw_content) - len(cleaned)) / len(raw_content), 2) if len(raw_content) > 0 else 0
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "original_length": len(raw_content)
+        }
+
 # Manual processing trigger (useful for debugging)
 @app.post("/process/trigger")
 async def trigger_processing(background_tasks: BackgroundTasks):
@@ -183,12 +229,26 @@ async def classify_content(content: Dict[str, Any]):
         raise HTTPException(status_code=400, detail="Content required")
     
     try:
-        result = await llm_interface.classify_email(email_content)
+        # Create a simple processing request for classification
+        from classification_models import EmailProcessingRequest
+        request = EmailProcessingRequest(
+            email_id="api_request",
+            sender="unknown@example.com",
+            content=email_content
+        )
+        
+        result = await llm_interface.classify_email(request)
         return {
             "classification": result.classification,
             "confidence": result.confidence,
-            "processing_time": result.processing_time,
-            "tokens_used": result.tokens_used
+            "sentiment": result.sentiment,
+            "sentiment_score": result.sentiment_score,
+            "formality": result.formality,
+            "personalization": result.personalization,
+            "priority": result.priority,
+            "should_process": result.should_process,
+            "processing_time_ms": result.processing_time_ms,
+            "reasoning": result.reasoning
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Classification failed: {str(e)}")
@@ -213,6 +273,70 @@ async def generate_embedding(content: Dict[str, Any]):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Embedding generation failed: {str(e)}")
+
+# Email cleaning endpoint (for testing our tiered approach)
+@app.post("/clean")
+async def clean_email_content(content: Dict[str, Any]):
+    """Clean email content using our tiered approach"""
+    if not email_processor:
+        raise HTTPException(status_code=503, detail="Email processor not ready")
+    
+    raw_content = content.get("content", "")
+    if not raw_content:
+        raise HTTPException(status_code=400, detail="Content required")
+    
+    try:
+        cleaned = await email_processor._clean_with_tiered_approach(raw_content)
+        method_used = getattr(email_processor, '_last_cleaning_method', 'unknown')
+        
+        return {
+            "original_length": len(raw_content),
+            "cleaned_length": len(cleaned),
+            "cleaned_content": cleaned,
+            "cleaning_method": method_used,
+            "reduction_ratio": round((len(raw_content) - len(cleaned)) / len(raw_content), 2) if len(raw_content) > 0 else 0
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Email cleaning failed: {str(e)}")
+
+# Thread summary endpoint
+@app.post("/summarize/thread")
+async def generate_thread_summary(request: Dict[str, Any]):
+    """Generate or update thread summary"""
+    if not email_processor:
+        raise HTTPException(status_code=503, detail="Email processor not ready")
+    
+    thread_id = request.get("thread_id")
+    force_update = request.get("force_update", False)
+    
+    if not thread_id:
+        raise HTTPException(status_code=400, detail="thread_id required")
+    
+    try:
+        summary = await email_processor.generate_thread_summary(thread_id, force_update)
+        
+        if summary:
+            return {
+                "success": True,
+                "summary": summary.dict(),
+                "message": f"Generated summary: {summary.summary_oneliner}"
+            }
+        else:
+            raise HTTPException(status_code=404, detail="Thread not found or summary generation failed")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Summary generation failed: {str(e)}")
+
+# Test endpoint for incremental development
+@app.get("/test1")
+async def test_endpoint():
+    """Simple test endpoint"""
+    return {"status": "auto-reload working!", "timestamp": "2025-06-23", "reload": True}
+
+@app.get("/test2")
+async def test_endpoint2():
+    """Another test endpoint"""
+    return {"test": "working"}
 
 async def main_processing_loop():
     """Main background processing loop"""
@@ -270,28 +394,14 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # Start background processing task
-    async def run_app():
-        # Start the main processing loop in the background
-        processing_task = asyncio.create_task(main_processing_loop())
-        
-        # Start the FastAPI server
-        config = uvicorn.Config(
-            app=app,
-            host="0.0.0.0",
-            port=8080,
-            log_level="info"
-        )
-        server = uvicorn.Server(config)
-        
-        try:
-            await server.serve()
-        finally:
-            processing_task.cancel()
-            try:
-                await processing_task
-            except asyncio.CancelledError:
-                pass
+    # Check if we should use uvicorn directly for reload
+    use_reload = os.getenv("UVICORN_RELOAD", "false").lower() == "true"
     
-    # Run the application
-    asyncio.run(run_app())
+    # Always use uvicorn directly for now (disable background processing during startup issues)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8080,
+        reload=use_reload,
+        log_level="info"
+    )

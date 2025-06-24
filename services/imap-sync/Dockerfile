@@ -5,14 +5,11 @@ RUN apk add --no-cache git ca-certificates
 
 WORKDIR /app
 
-# Copy go mod files
-COPY go.mod go.sum ./
-
-# Download dependencies
-RUN go mod download
-
-# Copy source code
+# Copy source code first so go mod tidy can analyze dependencies
 COPY . .
+
+# Download dependencies and tidy up (this will create go.sum)
+RUN go mod download && go mod tidy
 
 # Build the application
 RUN CGO_ENABLED=0 GOOS=linux go build -o email-imap-server .

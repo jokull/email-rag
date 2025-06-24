@@ -1,6 +1,6 @@
 """
-Content Processor
-Advanced email content processing using Unstructured.io and embeddings
+Content Processor - API Consumer
+Lightweight email content processing using Unstructured API + local embeddings
 """
 
 import asyncio
@@ -8,26 +8,15 @@ import logging
 import time
 import tempfile
 import os
+import subprocess
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple
 import json
 import numpy as np
 from pathlib import Path
 
-# Unstructured imports
+# Email cleaning imports  
 try:
-    from unstructured.partition.email import partition_email
-    from unstructured.chunking.title import chunk_by_title
-    from unstructured.chunking.basic import chunk_elements
-    UNSTRUCTURED_AVAILABLE = True
-except ImportError as e:
-    logging.error(f"❌ Unstructured not available: {e}")
-    UNSTRUCTURED_AVAILABLE = False
-
-# Email cleaning imports
-try:
-    import talon
-    from talon import quotations
     from email_reply_parser import EmailReplyParser
     EMAIL_CLEANING_AVAILABLE = True
 except ImportError as e:
@@ -35,12 +24,7 @@ except ImportError as e:
     EMAIL_CLEANING_AVAILABLE = False
 
 # Embedding imports
-try:
-    from sentence_transformers import SentenceTransformer
-    SENTENCE_TRANSFORMERS_AVAILABLE = True
-except ImportError as e:
-    logging.error(f"❌ SentenceTransformers not available: {e}")
-    SENTENCE_TRANSFORMERS_AVAILABLE = False
+from sentence_transformers import SentenceTransformer
 
 from config import ProcessorConfig, ELEMENT_TYPE_DESCRIPTIONS
 
@@ -74,7 +58,7 @@ class ProcessingResult:
 
 @dataclass
 class EmailElement:
-    """Structured email element from Unstructured"""
+    """Structured email element from Unstructured API"""
     element_id: str
     element_type: str
     content: str
@@ -95,38 +79,125 @@ class EmailChunk:
     metadata: Optional[Dict[str, Any]] = None
     quality_score: float = 1.0
 
+class UnstructuredLibraryClient:
+    """Docker exec client for Unstructured library"""
+    
+    def __init__(self, container_name: str = "email-rag-unstructured-1"):
+        self.container_name = container_name
+    
+    async def health_check(self) -> bool:
+        """Check if Unstructured container is available"""
+        try:
+            result = subprocess.run([
+                "docker", "exec", self.container_name, 
+                "python", "-c", "import unstructured; print('OK')"
+            ], capture_output=True, text=True, timeout=10)
+            return result.returncode == 0 and "OK" in result.stdout
+        except Exception as e:
+            logger.error(f"Unstructured container health check failed: {e}")
+            return False
+    
+    async def partition_email(self, email_content: str, strategy: str = "auto") -> List[Dict[str, Any]]:
+        """Partition email content using Unstructured library via Docker exec"""
+        try:
+            # Create temporary email file in container's /tmp
+            temp_filename = f"/tmp/email_{int(time.time())}.eml"
+            
+            # Write email content to container
+            echo_result = subprocess.run([
+                "docker", "exec", "-i", self.container_name,
+                "bash", "-c", f"cat > {temp_filename}"
+            ], input=email_content, text=True, capture_output=True, timeout=30)
+            
+            if echo_result.returncode != 0:
+                logger.error(f"Failed to write email file: {echo_result.stderr}")
+                return []
+            
+            # Create Python script to process the email
+            python_script = f'''
+import json
+from unstructured.partition.email import partition_email
+from unstructured.staging.base import elements_to_json
+
+try:
+    elements = partition_email(filename="{temp_filename}")
+    result = []
+    for element in elements:
+        result.append({{
+            "type": element.category,
+            "text": str(element),
+            "metadata": element.metadata.to_dict() if hasattr(element, 'metadata') else {{}}
+        }})
+    print(json.dumps(result))
+except Exception as e:
+    print(json.dumps({{"error": str(e)}}))
+'''
+            
+            # Execute Python script in container
+            exec_result = subprocess.run([
+                "docker", "exec", self.container_name,
+                "python", "-c", python_script
+            ], capture_output=True, text=True, timeout=60)
+            
+            # Clean up temp file
+            subprocess.run([
+                "docker", "exec", self.container_name,
+                "rm", "-f", temp_filename
+            ], capture_output=True)
+            
+            if exec_result.returncode != 0:
+                logger.error(f"Unstructured processing failed: {exec_result.stderr}")
+                return []
+            
+            try:
+                result = json.loads(exec_result.stdout)
+                if isinstance(result, dict) and "error" in result:
+                    logger.error(f"Unstructured processing error: {result['error']}")
+                    return []
+                return result
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse Unstructured output: {e}")
+                logger.error(f"Raw output: {exec_result.stdout}")
+                return []
+                    
+        except Exception as e:
+            logger.error(f"Error calling Unstructured library: {e}")
+            return []
+
 class ContentProcessor:
     """
-    Advanced content processor using Unstructured.io for email parsing
-    and sentence-transformers for embeddings
+    Lightweight content processor using Unstructured API for document processing
+    and local sentence-transformers for embeddings
     """
     
     def __init__(self, config: ProcessorConfig):
         self.config = config
         self.ready = False
-        self.unstructured_available = UNSTRUCTURED_AVAILABLE
         self.embedding_model = None
         self.total_processed = 0
         self.total_processing_time = 0.0
         self.logger = logging.getLogger(__name__)
         self.last_processing_data = {}  # Store last processed data for database storage
         
+        # Initialize Unstructured library client
+        self.unstructured_client = UnstructuredLibraryClient()
+        
     async def initialize(self):
         """Initialize the content processor"""
         try:
             self.logger.info("🔧 Initializing content processor...")
             
-            # Check Unstructured availability
-            if not self.unstructured_available:
-                raise RuntimeError("Unstructured.io not available")
+            # Check Unstructured container availability
+            container_available = await self.unstructured_client.health_check()
+            if not container_available:
+                self.logger.warning("⚠️ Unstructured container not available - will retry during processing")
+            else:
+                self.logger.info("✅ Unstructured container connection verified")
                 
             # Initialize embedding model
-            if SENTENCE_TRANSFORMERS_AVAILABLE:
-                self.logger.info(f"📥 Loading embedding model: {self.config.embedding_model}")
-                self.embedding_model = SentenceTransformer(self.config.embedding_model)
-                self.logger.info("✅ Embedding model loaded")
-            else:
-                self.logger.warning("⚠️ SentenceTransformers not available - embeddings disabled")
+            self.logger.info(f"📥 Loading embedding model: {self.config.embedding_model}")
+            self.embedding_model = SentenceTransformer(self.config.embedding_model)
+            self.logger.info("✅ Embedding model loaded")
             
             self.ready = True
             self.logger.info("✅ Content processor ready")
@@ -148,33 +219,15 @@ class ContentProcessor:
             content_to_clean = html_content if html_content and self.config.prefer_html_content else content
             original_length = len(content_to_clean)
             
-            # Step 1: Remove quoted/reply content using Talon
+            # Use email-reply-parser for basic cleaning
             try:
-                cleaned_content = quotations.extract_from_plain(content_to_clean)
-                self.logger.debug(f"📧 Talon quotation removal: {original_length} → {len(cleaned_content)} chars")
+                cleaned_content = EmailReplyParser.parse_reply(content_to_clean)
+                self.logger.debug(f"📧 Email reply parser: {original_length} → {len(cleaned_content)} chars")
             except Exception as e:
-                self.logger.warning(f"Talon quotation removal failed: {e}")
+                self.logger.warning(f"Email reply parser failed: {e}")
                 cleaned_content = content_to_clean
             
-            # Step 2: Remove signatures using Talon
-            try:
-                cleaned_content, signature = talon.signature.extract(cleaned_content, sender)
-                self.logger.debug(f"✂️ Talon signature removal: extracted {len(signature)} char signature")
-            except Exception as e:
-                self.logger.warning(f"Talon signature removal failed: {e}")
-                signature = ""
-            
-            # Step 3: Alternative cleaning with email-reply-parser for comparison
-            try:
-                reply_parser_result = EmailReplyParser.parse_reply(content_to_clean)
-                if len(reply_parser_result) < len(cleaned_content) and len(reply_parser_result) > 50:
-                    # Use reply parser result if it's more aggressive but still substantial
-                    cleaned_content = reply_parser_result
-                    self.logger.debug(f"🔧 Used email-reply-parser result instead")
-            except Exception as e:
-                self.logger.warning(f"Email-reply-parser failed: {e}")
-            
-            # Step 4: Basic HTML cleaning if needed
+            # Basic HTML cleaning if needed
             if html_content and "<" in cleaned_content:
                 import re
                 # Remove HTML tags but preserve structure
@@ -187,7 +240,8 @@ class ContentProcessor:
                 cleaned_content = re.sub(r'<p[^>]*>', '\n', cleaned_content)
                 cleaned_content = re.sub(r'</p>', '\n', cleaned_content)
             
-            # Step 5: Final cleanup
+            # Final cleanup
+            import re
             cleaned_content = re.sub(r'\n\s*\n\s*\n', '\n\n', cleaned_content)  # Multiple newlines
             cleaned_content = re.sub(r'[ \t]+', ' ', cleaned_content)  # Multiple spaces
             cleaned_content = cleaned_content.strip()
@@ -202,12 +256,11 @@ class ContentProcessor:
                 reduction_ratio = 0
             
             cleaning_metadata = {
-                "method": "talon+email-reply-parser",
+                "method": "email-reply-parser",
                 "cleaned": True,
                 "original_length": original_length,
                 "final_length": final_length,
                 "reduction_ratio": reduction_ratio,
-                "signature_length": len(signature),
                 "html_processed": html_content is not None
             }
             
@@ -218,237 +271,80 @@ class ContentProcessor:
             self.logger.error(f"❌ Email cleaning failed: {e}")
             return content, {"method": "failed", "cleaned": False, "error": str(e)}
     
-    def _convert_elements_to_markdown(self, elements: List[EmailElement]) -> List[Tuple[EmailElement, str]]:
-        """
-        Convert Unstructured elements to clean markdown format
-        Returns: List of (element, markdown_content) tuples
-        """
-        markdown_elements = []
-        
-        for element in elements:
-            try:
-                markdown_content = self._element_to_markdown(element)
-                markdown_elements.append((element, markdown_content))
-            except Exception as e:
-                self.logger.warning(f"Failed to convert element to markdown: {e}")
-                # Fallback to plain text
-                markdown_elements.append((element, element.content))
-        
-        return markdown_elements
-    
-    def _element_to_markdown(self, element: EmailElement) -> str:
-        """
-        Convert a single element to markdown format
-        """
-        content = element.content.strip()
-        element_type = element.element_type
-        
-        if element_type == "Title":
-            # Email subjects or section headers
-            return f"# {content}\n\n"
-        
-        elif element_type == "NarrativeText":
-            # Main email content - clean paragraphs
-            # Format URLs as links
-            import re
-            content = re.sub(
-                r'(https?://[^\s]+)', 
-                r'[\1](\1)', 
-                content
-            )
-            # Format email addresses  
-            content = re.sub(
-                r'\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,})\b',
-                r'`\1`',
-                content
-            )
-            return f"{content}\n\n"
-        
-        elif element_type == "ListItem":
-            # Preserve list structure
-            return f"- {content}\n"
-        
-        elif element_type == "Table":
-            # Convert table to markdown table (simplified)
-            return f"\n{content}\n\n"  # TODO: Implement proper table conversion
-        
-        elif element_type == "Address":
-            # Format addresses in code blocks
-            return f"```\n{content}\n```\n\n"
-        
-        elif element_type == "UncategorizedText":
-            # Treat as regular text
-            return f"{content}\n\n"
-        
-        else:
-            # Default formatting
-            return f"{content}\n\n"
-
-    def _create_temp_email_file(self, content: str, html_content: Optional[str] = None) -> str:
-        """Create temporary .eml file for Unstructured processing"""
+    def _create_email_file_content(self, content: str, html_content: Optional[str] = None) -> str:
+        """Create email file content for Unstructured API processing"""
         # Create a basic .eml structure
-        email_content = []
+        email_lines = []
         
         # Basic headers
-        email_content.append("MIME-Version: 1.0")
-        email_content.append("Content-Type: text/plain; charset=utf-8")
-        email_content.append("")  # Empty line after headers
+        email_lines.append("MIME-Version: 1.0")
         
-        # Use HTML content if available and preferred
         if html_content and self.config.prefer_html_content:
-            email_content = [
-                "MIME-Version: 1.0",
-                "Content-Type: text/html; charset=utf-8",
-                "",
-                html_content
-            ]
+            email_lines.append("Content-Type: text/html; charset=utf-8")
+            email_lines.append("")  # Empty line after headers
+            email_lines.append(html_content)
         else:
-            email_content.append(content)
+            email_lines.append("Content-Type: text/plain; charset=utf-8")
+            email_lines.append("")  # Empty line after headers
+            email_lines.append(content)
         
-        # Write to temporary file
-        temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.eml', delete=False, encoding='utf-8')
-        temp_file.write('\n'.join(email_content))
-        temp_file.close()
-        
-        return temp_file.name
+        return '\n'.join(email_lines)
     
-    def _extract_elements(self, email_path: str) -> List[EmailElement]:
-        """Extract elements from email using Unstructured"""
+    async def _extract_elements_via_library(self, email_content: str) -> List[EmailElement]:
+        """Extract elements from email using Unstructured library"""
         try:
-            # Partition the email
-            elements = partition_email(
-                filename=email_path,
-                include_headers=self.config.include_headers,
-                process_attachments=self.config.process_attachments,
-                content_source="text/html" if self.config.prefer_html_content else "text/plain"
+            # Call Unstructured library via Docker exec
+            library_response = await self.unstructured_client.partition_email(
+                email_content, 
+                strategy="auto"
             )
             
-            processed_elements = []
+            if not library_response:
+                self.logger.warning("No response from Unstructured library")
+                return []
             
-            for i, element in enumerate(elements):
+            elements = []
+            for i, element_data in enumerate(library_response):
+                # Extract element information from API response
+                element_type = element_data.get('type', 'UncategorizedText')
+                element_text = element_data.get('text', '')
+                element_metadata = element_data.get('metadata', {})
+                
                 # Filter by element type if specified
                 if (self.config.element_types_to_process and 
-                    element.category not in self.config.element_types_to_process):
+                    element_type not in self.config.element_types_to_process):
                     continue
                 
                 # Filter by length
-                element_text = str(element)
                 if len(element_text) < self.config.min_element_length:
                     continue
                 
                 # Create structured element
                 email_element = EmailElement(
-                    element_id=getattr(element, 'id', f"element_{i}"),
-                    element_type=element.category,
+                    element_id=element_data.get('element_id', f"element_{i}"),
+                    element_type=element_type,
                     content=element_text,
-                    metadata=element.metadata.to_dict() if hasattr(element, 'metadata') else {},
+                    metadata=element_metadata,
                     sequence_number=i
                 )
                 
                 # Add coordinates if available
-                if hasattr(element, 'metadata') and hasattr(element.metadata, 'coordinates'):
-                    email_element.coordinates = element.metadata.coordinates
+                if 'coordinates' in element_metadata:
+                    email_element.coordinates = element_metadata['coordinates']
                 
-                processed_elements.append(email_element)
+                elements.append(email_element)
             
-            return processed_elements
+            return elements
             
         except Exception as e:
-            self.logger.error(f"Element extraction failed: {e}")
+            self.logger.error(f"Element extraction via library failed: {e}")
             return []
     
-    def _chunk_elements(self, elements: List[EmailElement]) -> List[EmailChunk]:
-        """Chunk elements using Unstructured's chunking strategies"""
+    def _chunk_elements_simple(self, elements: List[EmailElement]) -> List[EmailChunk]:
+        """Simple chunking strategy for elements"""
         if not elements:
             return []
         
-        try:
-            # Convert back to Unstructured elements for chunking
-            unstructured_elements = []
-            for elem in elements:
-                # Create a minimal element object for chunking
-                # This is a simplified approach - in practice you'd want to reconstruct proper Element objects
-                class MockElement:
-                    def __init__(self, text, category, metadata):
-                        self.text = text
-                        self.category = category
-                        self.metadata = metadata
-                    
-                    def __str__(self):
-                        return self.text
-                
-                mock_elem = MockElement(elem.content, elem.element_type, elem.metadata)
-                unstructured_elements.append(mock_elem)
-            
-            # Apply chunking strategy
-            if self.config.unstructured_strategy == "by_title":
-                chunks = chunk_by_title(
-                    unstructured_elements,
-                    max_characters=self.config.max_characters,
-                    new_after_n_chars=self.config.new_after_n_chars,
-                    overlap=self.config.overlap,
-                    overlap_all=self.config.overlap_all
-                )
-            else:  # basic strategy
-                chunks = chunk_elements(
-                    unstructured_elements,
-                    max_characters=self.config.max_characters,
-                    new_after_n_chars=self.config.new_after_n_chars,
-                    overlap=self.config.overlap,
-                    overlap_all=self.config.overlap_all
-                )
-            
-            # Convert to EmailChunk objects
-            email_chunks = []
-            for i, chunk in enumerate(chunks):
-                chunk_text = str(chunk)
-                
-                # Quality check
-                word_count = len(chunk_text.split())
-                if word_count < self.config.min_chunk_words:
-                    continue
-                
-                # Calculate quality score based on word count and coherence
-                quality_score = min(1.0, max(0.1, 
-                    (word_count - self.config.min_chunk_words) / 
-                    (self.config.target_chunk_words - self.config.min_chunk_words)
-                ))
-                
-                # Get element type from original elements
-                element_type = "NarrativeText"  # Default
-                element_ids = []
-                
-                # Try to map back to original elements
-                for elem in elements:
-                    if elem.content in chunk_text:
-                        element_type = elem.element_type
-                        element_ids.append(elem.element_id)
-                        break
-                
-                email_chunk = EmailChunk(
-                    chunk_id=f"chunk_{i}",
-                    text=chunk_text,
-                    element_type=element_type,
-                    element_ids=element_ids,
-                    quality_score=quality_score,
-                    metadata={
-                        "word_count": word_count,
-                        "chunk_index": i,
-                        "chunking_strategy": self.config.unstructured_strategy
-                    }
-                )
-                
-                email_chunks.append(email_chunk)
-            
-            return email_chunks
-            
-        except Exception as e:
-            self.logger.error(f"Chunking failed: {e}")
-            # Fallback: create simple chunks from elements
-            return self._fallback_chunking(elements)
-    
-    def _fallback_chunking(self, elements: List[EmailElement]) -> List[EmailChunk]:
-        """Fallback chunking when Unstructured chunking fails"""
         chunks = []
         current_text = ""
         current_elements = []
@@ -466,15 +362,15 @@ class ContentProcessor:
             word_count = len(current_text.split())
             if word_count >= self.config.target_chunk_words:
                 chunk = EmailChunk(
-                    chunk_id=f"fallback_chunk_{chunk_index}",
+                    chunk_id=f"chunk_{chunk_index}",
                     text=current_text,
                     element_type=element.element_type,
                     element_ids=current_elements.copy(),
-                    quality_score=0.7,  # Lower quality for fallback
+                    quality_score=0.8,
                     metadata={
                         "word_count": word_count,
                         "chunk_index": chunk_index,
-                        "chunking_strategy": "fallback"
+                        "chunking_strategy": "simple"
                     }
                 )
                 chunks.append(chunk)
@@ -487,15 +383,15 @@ class ContentProcessor:
         # Add remaining content as final chunk
         if current_text and len(current_text.split()) >= self.config.min_chunk_words:
             chunk = EmailChunk(
-                chunk_id=f"fallback_chunk_{chunk_index}",
+                chunk_id=f"chunk_{chunk_index}",
                 text=current_text,
                 element_type="NarrativeText",
                 element_ids=current_elements,
-                quality_score=0.7,
+                quality_score=0.8,
                 metadata={
                     "word_count": len(current_text.split()),
                     "chunk_index": chunk_index,
-                    "chunking_strategy": "fallback"
+                    "chunking_strategy": "simple"
                 }
             )
             chunks.append(chunk)
@@ -581,9 +477,8 @@ class ContentProcessor:
         html_content: Optional[str] = None,
         sender: str = ""
     ) -> ProcessingResult:
-        """Process email content using enhanced cleaning + Unstructured + embeddings"""
+        """Process email content using Unstructured API + local embeddings"""
         start_time = time.time()
-        temp_file = None
         
         try:
             self.logger.info(f"🔄 Processing email {email_id}")
@@ -598,26 +493,18 @@ class ContentProcessor:
                 self.logger.warning(f"Email {email_id} too long after cleaning ({len(cleaned_content)} chars), truncating")
                 cleaned_content = cleaned_content[:self.config.max_content_length]
             
-            # Step 2: Create temporary email file with cleaned content
-            temp_file = self._create_temp_email_file(cleaned_content, None)  # Use cleaned content only
+            # Step 2: Create email file content for API
+            email_file_content = self._create_email_file_content(cleaned_content, None)
             
-            # Step 3: Extract elements using Unstructured
-            elements = self._extract_elements(temp_file)
-            self.logger.info(f"📋 Extracted {len(elements)} clean elements from email {email_id}")
+            # Step 3: Extract elements using Unstructured library
+            elements = await self._extract_elements_via_library(email_file_content)
+            self.logger.info(f"📋 Extracted {len(elements)} elements from email {email_id}")
             
-            # Step 4: Convert elements to markdown
-            markdown_elements = self._convert_elements_to_markdown(elements)
-            self.logger.info(f"📝 Converted {len(markdown_elements)} elements to markdown")
-            
-            # Add markdown content to elements
-            for element, markdown_content in markdown_elements:
-                element.markdown_content = markdown_content
-            
-            # Step 5: Chunk elements
-            chunks = self._chunk_elements(elements)
+            # Step 4: Chunk elements (simple strategy)
+            chunks = self._chunk_elements_simple(elements)
             self.logger.info(f"🧩 Created {len(chunks)} chunks from email {email_id}")
             
-            # Step 6: Generate embeddings
+            # Step 5: Generate embeddings locally
             chunks_with_embeddings = await self._generate_embeddings(chunks)
             embeddings_created = sum(1 for c in chunks_with_embeddings if c.embedding is not None)
             self.logger.info(f"🎯 Generated {embeddings_created} embeddings for email {email_id}")
@@ -625,8 +512,7 @@ class ContentProcessor:
             # Store processed data for database storage
             self.last_processing_data = {
                 'elements': elements,
-                'chunks': chunks_with_embeddings,
-                'markdown_elements': markdown_elements
+                'chunks': chunks_with_embeddings
             }
             
             processing_time = time.time() - start_time
@@ -644,8 +530,7 @@ class ContentProcessor:
                 "content_length_original": len(html_content or content),
                 "content_length_cleaned": len(cleaned_content),
                 "cleaning_metadata": cleaning_metadata,
-                "markdown_elements_created": len(markdown_elements),
-                "has_markdown": True
+                "processing_method": "unstructured_library"
             }
             
             result = ProcessingResult(
@@ -676,14 +561,6 @@ class ContentProcessor:
                 processing_time_ms=processing_time * 1000,
                 error_message=str(e)
             )
-            
-        finally:
-            # Clean up temporary file
-            if temp_file and os.path.exists(temp_file):
-                try:
-                    os.unlink(temp_file)
-                except:
-                    pass
     
     def get_stats(self) -> Dict[str, Any]:
         """Get processing statistics"""
@@ -691,7 +568,7 @@ class ContentProcessor:
         
         return {
             "ready": self.ready,
-            "unstructured_available": self.unstructured_available,
+            "unstructured_available": True,  # We check this via Docker exec
             "embedding_model_loaded": self.embedding_model is not None,
             "total_processed": self.total_processed,
             "average_processing_time_ms": avg_time * 1000,

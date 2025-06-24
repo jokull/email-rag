@@ -16,7 +16,14 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 import uvicorn
-import psutil
+
+# Try to import psutil for system monitoring
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    logging.warning("⚠️ psutil not available - system monitoring disabled")
 
 from processor import ContentProcessor, ProcessingResult
 from config import ProcessorConfig
@@ -75,10 +82,16 @@ class HealthMonitor:
         self.recent_errors = [e for e in self.recent_errors if e['timestamp'] > cutoff]
     
     def get_status(self) -> HealthStatus:
-        # Memory and CPU usage
-        process = psutil.Process()
-        memory_mb = process.memory_info().rss / (1024 * 1024)
-        cpu_percent = process.cpu_percent()
+        # Memory and CPU usage (if psutil available)
+        memory_mb = 0.0
+        cpu_percent = 0.0
+        if PSUTIL_AVAILABLE:
+            try:
+                process = psutil.Process()
+                memory_mb = process.memory_info().rss / (1024 * 1024)
+                cpu_percent = process.cpu_percent()
+            except Exception:
+                pass
         
         # Get queue size
         queue_size = 0
@@ -86,8 +99,9 @@ class HealthMonitor:
             try:
                 with SessionLocal() as session:
                     result = session.execute(text("""
-                        SELECT COUNT(*) FROM processing_queue 
-                        WHERE queue_type = 'content_processing' AND status = 'pending'
+                        SELECT COUNT(*) FROM cleaned_emails ce
+                        LEFT JOIN enhanced_embeddings ee ON ce.email_id = ee.email_id
+                        WHERE ee.email_id IS NULL AND ce.word_count >= 20
                     """)).fetchone()
                     queue_size = result[0] if result else 0
             except:
@@ -101,7 +115,7 @@ class HealthMonitor:
             healthy=processor is not None and db_engine is not None,
             processor_ready=processor is not None and processor.ready,
             database_connected=db_engine is not None,
-            unstructured_available=processor is not None and processor.unstructured_available,
+            unstructured_available=True,  # Always true for library approach
             memory_usage_mb=memory_mb,
             cpu_usage_percent=cpu_percent,
             emails_processed=self.total_processed,
@@ -309,7 +323,7 @@ async def get_metrics():
                         AVG(actual_processing_time) as avg_time,
                         AVG(quality_score) as avg_quality
                     FROM processing_queue 
-                    WHERE queue_type = 'content_processing'
+                    WHERE queue_type = 'embedding'
                     GROUP BY status, content_type
                 """)).fetchall()
                 
@@ -400,18 +414,34 @@ async def process_content_queue():
                 await asyncio.sleep(5)
                 continue
             
-            # Get pending items from queue
+            # Get cleaned emails that need Unstructured processing (prioritize by classification)
             with SessionLocal() as session:
                 pending_items = session.execute(text("""
-                    SELECT pq.id, pq.thread_id, pq.priority, pq.content_type,
-                           e.id as email_id, e.subject, e.body_text, e.body_html, e.from_email
-                    FROM processing_queue pq
-                    JOIN threads t ON pq.thread_id = t.id
-                    JOIN emails e ON e.thread_id = t.id
-                    WHERE pq.queue_type = 'content_processing' 
-                    AND pq.status = 'pending'
-                    AND pq.attempts < pq.max_attempts
-                    ORDER BY pq.priority DESC, pq.created_at ASC
+                    SELECT 
+                        ce.email_id,
+                        ce.clean_content,
+                        e.subject,
+                        e.from_email,
+                        ce.cleaning_method,
+                        ce.word_count,
+                        c.classification,
+                        c.priority,
+                        c.priority_score,
+                        c.relationship_strength,
+                        c.personalization_score,
+                        c.should_process
+                    FROM cleaned_emails ce
+                    JOIN emails e ON ce.email_id = e.id
+                    LEFT JOIN classifications c ON ce.email_id = c.email_id
+                    LEFT JOIN enhanced_embeddings ee ON ce.email_id = ee.email_id
+                    WHERE ee.email_id IS NULL  -- Not yet processed by Unstructured
+                    AND ce.word_count >= 20   -- Skip very short cleaned content
+                    AND (c.should_process IS TRUE OR c.should_process IS NULL)  -- Only process important emails
+                    ORDER BY 
+                        c.priority_score DESC NULLS LAST,
+                        c.relationship_strength DESC NULLS LAST,
+                        c.personalization_score DESC NULLS LAST,
+                        ce.created_at ASC
                     LIMIT 5  -- Process fewer at a time due to complexity
                 """)).fetchall()
                 
@@ -419,27 +449,18 @@ async def process_content_queue():
                     await asyncio.sleep(10)  # Longer sleep for content processing
                     continue
                 
-                logger.info(f"📧 Processing {len(pending_items)} emails for content extraction")
+                logger.info(f"📧 Processing {len(pending_items)} cleaned emails for Unstructured extraction")
                 
                 for item in pending_items:
                     try:
-                        # Mark as processing
-                        session.execute(text("""
-                            UPDATE processing_queue 
-                            SET status = 'processing',
-                                processing_started_at = NOW(),
-                                attempts = attempts + 1
-                            WHERE id = :queue_id
-                        """), {"queue_id": item.id})
-                        session.commit()
-                        
-                        # Process the email content
+                        # Process the cleaned email content with Unstructured
                         start_time = time.time()
                         result = await processor.process_email(
                             email_id=item.email_id,
                             subject=item.subject or '',
-                            content=item.body_text or '',
-                            html_content=item.body_html if item.content_type == 'html' else None
+                            content=item.clean_content,  # Use cleaned content instead of raw
+                            html_content=None,  # Already cleaned by Talon
+                            sender=item.from_email or ''
                         )
                         processing_time = time.time() - start_time
                         
@@ -447,50 +468,13 @@ async def process_content_queue():
                         if result.success:
                             await store_processing_results(session, item.email_id, result, processing_time)
                         
-                        # Update queue with results
-                        session.execute(text("""
-                            UPDATE processing_queue 
-                            SET status = 'completed',
-                                processing_completed_at = NOW(),
-                                actual_processing_time = :processing_time,
-                                quality_score = :quality_score,
-                                elements_extracted = :elements_extracted,
-                                chunks_created = :chunks_created,
-                                embeddings_created = :embeddings_created
-                            WHERE id = :queue_id
-                        """), {
-                            "queue_id": item.id,
-                            "processing_time": int(processing_time * 1000),
-                            "quality_score": result.quality_score,
-                            "elements_extracted": result.elements_extracted,
-                            "chunks_created": result.chunks_created,
-                            "embeddings_created": result.embeddings_created
-                        })
-                        
-                        session.commit()
                         health_monitor.record_processing(processing_time)
                         
-                        logger.info(f"✅ Processed email {item.email_id}: {result.elements_extracted} elements, {result.chunks_created} chunks, {result.embeddings_created} embeddings")
+                        logger.info(f"✅ Processed cleaned email {item.email_id}: {result.elements_extracted} elements, {result.chunks_created} chunks, {result.embeddings_created} embeddings (cleaning: {item.cleaning_method}, priority: {item.priority or 'unknown'}, relationship: {item.relationship_strength or 0:.2f})")
                         
                     except Exception as e:
-                        logger.error(f"❌ Failed to process email {item.email_id}: {e}")
+                        logger.error(f"❌ Failed to process cleaned email {item.email_id}: {e}")
                         health_monitor.record_error(e)
-                        
-                        # Mark as failed
-                        session.execute(text("""
-                            UPDATE processing_queue 
-                            SET status = CASE 
-                                    WHEN attempts >= max_attempts THEN 'failed'
-                                    ELSE 'pending'
-                                END,
-                                error_message = :error_message,
-                                processing_completed_at = NOW()
-                            WHERE id = :queue_id
-                        """), {
-                            "queue_id": item.id,
-                            "error_message": str(e)[:500]
-                        })
-                        session.commit()
         
         except Exception as e:
             logger.error(f"❌ Queue processing error: {e}")

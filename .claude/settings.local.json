@@ -11,7 +11,21 @@
       "WebFetch(domain:docs.unstructured.io)",
       "WebFetch(domain:hub.docker.com)",
       "Bash(find:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(docker-compose up:*)",
+      "Bash(sed:*)",
+      "Bash(docker-compose build:*)",
+      "Bash(docker-compose down:*)",
+      "Bash(docker-compose exec content-processor find:*)",
+      "Bash(docker-compose logs:*)",
+      "WebFetch(domain:unstructured-io.github.io)",
+      "Bash(docker-compose restart:*)",
+      "Bash(docker-compose exec:*)",
+      "Bash(curl:*)",
+      "Bash(docker-compose:*)",
+      "Bash(psql:*)",
+      "WebFetch(domain:tristiks.com)",
+      "WebFetch(domain:fastapi.tiangolo.com)"
     ],
     "deny": []
   }

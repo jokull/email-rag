@@ -5,13 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/client"
-	"github.com/emersion/go-message/mail"
 	"github.com/sirupsen/logrus"
 )
 
@@ -149,7 +147,7 @@ func (s *EmailSyncer) syncMailbox(c *client.Client, mailboxName string) error {
 
 	// Fetch message envelopes, UIDs, and full content
 	messages := make(chan *imap.Message, 10)
-	done = make(chan error, 1)
+	done := make(chan error, 1)
 	
 	fetchItems := []imap.FetchItem{
 		imap.FetchEnvelope, 
@@ -230,10 +228,16 @@ func (s *EmailSyncer) processMessage(mailboxID int, mailboxName string, msg *ima
 		return fmt.Errorf("failed to marshal envelope: %v", err)
 	}
 
-	// Convert flags to string array
-	flags := make([]string, len(msg.Flags))
-	for i, flag := range msg.Flags {
-		flags[i] = string(flag)
+	// Convert flags to PostgreSQL array format
+	var flagsArray interface{}
+	if len(msg.Flags) > 0 {
+		flagStrings := make([]string, len(msg.Flags))
+		for i, flag := range msg.Flags {
+			flagStrings[i] = string(flag)
+		}
+		flagsArray = "{" + strings.Join(flagStrings, ",") + "}"
+	} else {
+		flagsArray = "{}"
 	}
 
 	// Get raw message content
@@ -253,7 +257,7 @@ func (s *EmailSyncer) processMessage(mailboxID int, mailboxName string, msg *ima
 			envelope, raw_message, created_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
 		ON CONFLICT (mailbox_id, uid) DO NOTHING
-	`, mailboxID, msg.Uid, flags, msg.InternalDate, msg.Size, envelopeJSON, rawMessage)
+	`, mailboxID, msg.Uid, flagsArray, msg.InternalDate, msg.Size, envelopeJSON, rawMessage)
 
 	if err != nil {
 		return fmt.Errorf("failed to insert message: %v", err)

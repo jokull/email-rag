@@ -14,10 +14,26 @@ from config import LLMConfig, CLASSIFICATION_PROMPTS
 
 @dataclass
 class ClassificationResult:
-    classification: str
+    # Basic classification
+    classification: str  # human/promotional/transactional/automated
     confidence: float
     processing_time: float
     tokens_used: int
+    
+    # Enhanced multi-dimensional analysis
+    sentiment: str = "neutral"  # positive/neutral/negative
+    sentiment_score: float = 0.0  # -1.0 to 1.0
+    formality: str = "neutral"  # formal/informal/casual
+    formality_score: float = 0.0  # 0.0 to 1.0
+    personalization: str = "generic"  # highly_personal/somewhat_personal/generic  
+    personalization_score: float = 0.0  # 0.0 to 1.0
+    priority: str = "normal"  # urgent/normal/low
+    priority_score: float = 0.0  # 0.0 to 1.0
+    
+    # Contact history context
+    sender_frequency_score: float = 0.0  # How often this sender emails
+    response_likelihood: float = 0.0  # Historical response rate
+    relationship_strength: float = 0.0  # Based on email patterns
 
 @dataclass
 class ChunkingResult:

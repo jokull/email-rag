@@ -23,8 +23,7 @@ class EmbeddingService:
         self.model: Optional[SentenceTransformer] = None
         self.model_loaded = False
         
-        # Initialize model in background
-        asyncio.create_task(self._load_model())
+        # Model will be loaded on first use
     
     async def _load_model(self):
         """Load the embedding model"""
@@ -49,7 +48,9 @@ class EmbeddingService:
     async def generate_embedding(self, text: str) -> np.ndarray:
         """Generate embedding for text"""
         if not self.model_loaded or not self.model:
-            raise RuntimeError("Embedding model not loaded")
+            await self._load_model()
+            if not self.model_loaded or not self.model:
+                raise RuntimeError("Embedding model failed to load")
         
         try:
             # Clean and prepare text

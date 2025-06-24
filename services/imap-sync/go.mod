@@ -4,8 +4,6 @@ go 1.21
 
 require (
 	github.com/emersion/go-imap v1.2.1
-	github.com/emersion/go-imap/client v1.0.0
-	github.com/foxcpp/go-imap-sql v0.6.0
 	github.com/lib/pq v1.10.9
 	github.com/sirupsen/logrus v1.9.3
 )
