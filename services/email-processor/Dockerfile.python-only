@@ -15,8 +15,8 @@ ENV PATH="/root/.local/bin:$PATH"
 # Set working directory
 WORKDIR /app
 
-# Create non-root user
-RUN groupadd -r emailprocessor && useradd -r -g emailprocessor emailprocessor
+# Create non-root user with home directory
+RUN groupadd -r emailprocessor && useradd -r -g emailprocessor -m emailprocessor
 
 # Copy Python requirements and install dependencies (without maturin)
 COPY requirements.txt .
@@ -27,6 +27,10 @@ COPY *.py ./
 
 # Set ownership to non-root user
 RUN chown -R emailprocessor:emailprocessor /app
+
+# Create cache directories for models
+RUN mkdir -p /home/emailprocessor/.cache && \
+    chown -R emailprocessor:emailprocessor /home/emailprocessor/.cache
 
 # Switch to non-root user
 USER emailprocessor

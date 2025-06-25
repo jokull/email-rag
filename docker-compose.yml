@@ -48,65 +48,7 @@ services:
       - email_store:/var/lib/email-store
     restart: unless-stopped
 
-  # Email scorer service - rapid Qwen-based triage and scoring
-  # email-scorer:
-  #   build: ./services/email-scorer
-  #   environment:
-  #     DATABASE_URL: postgresql://email_user:email_pass@postgres:5432/email_rag?sslmode=disable
-  #     # Lightweight Qwen-0.5B configuration for rapid scoring
-  #     QWEN_MODEL_PATH: /app/models/qwen-0.5b-q4_0.gguf
-  #     SCORING_INTERVAL: ${SCORING_INTERVAL:-5}
-  #     SCORING_BATCH_SIZE: ${SCORING_BATCH_SIZE:-10}
-  #     USE_METAL: ${USE_METAL:-true}
-  #     LOG_LEVEL: ${LOG_LEVEL:-info}
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #   volumes:
-  #     - llm_models:/app/models  # Shared Qwen model storage
-  #     - scorer_logs:/app/logs
-  #   ports:
-  #     - "8081:8081"
-  #   # Resource limits for scoring service
-  #   deploy:
-  #     resources:
-  #       limits:
-  #         memory: 1G  # Lighter memory usage for scoring
-  #       reservations:
-  #         memory: 512M
-  #   restart: unless-stopped
-  #   healthcheck:
-  #     test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8081/health')"]
-  #     interval: 30s
-  #     timeout: 10s
-  #     retries: 3
-
-
-  # Email processing service - Cleans and processes emails from IMAP
-  email-processor:
-    build: 
-      context: ./services/email-processor
-      dockerfile: Dockerfile.python-only
-    environment:
-      DATABASE_URL: postgresql://email_user:email_pass@postgres:5432/email_rag
-      HOST: 0.0.0.0
-      PORT: 8080
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      POLL_INTERVAL: ${POLL_INTERVAL:-30}
-      BATCH_SIZE: ${BATCH_SIZE:-50}
-    ports:
-      - "8080:8080"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8080/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # Email processing worker - Background worker for email processing
+  # Email processing worker - Background worker for email cleaning and parsing
   email-processor-worker:
     build: 
       context: ./services/email-processor
@@ -117,12 +59,15 @@ services:
       POLL_INTERVAL: ${POLL_INTERVAL:-30}
       BATCH_SIZE: ${BATCH_SIZE:-50}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      MAILBOX_FILTER: ${MAILBOX_FILTER:-INBOX}
+    volumes:
+      - ./services/email-processor:/app
     depends_on:
       postgres:
         condition: service_healthy
     restart: unless-stopped
 
-  # Unstructured.io service - Official Docker image as library container
+  # Unstructured.io service - For text processing and embeddings
   unstructured:
     image: downloads.unstructured.io/unstructured-io/unstructured:latest
     environment:
@@ -138,32 +83,6 @@ services:
     restart: unless-stopped
     # Keep container running for library access
     command: ["tail", "-f", "/dev/null"]
-
-
-
-  # Zero cache server for real-time UI sync (disabled for debugging)
-  # zero-cache:
-  #   image: rocicorp/zero:latest
-  #   environment:
-  #     ZERO_UPSTREAM_DB: postgresql://email_user:email_pass@postgres:5432/email_rag
-  #     ZERO_AUTH_SECRET: ${ZERO_AUTH_SECRET:?ZERO_AUTH_SECRET is required - generate with openssl rand -base64 32}
-  #   ports:
-  #     - "4848:4848"
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #   restart: unless-stopped
-
-  # UI service disabled for development - run locally with: cd web && bun run dev
-  # ui:
-  #   build: ./web
-  #   environment:
-  #     VITE_PUBLIC_SERVER: http://localhost:4848
-  #   ports:
-  #     - "3001:3000"
-  #   depends_on:
-  #     - zero-cache
-  #   restart: unless-stopped
 
 volumes:
   postgres_data:

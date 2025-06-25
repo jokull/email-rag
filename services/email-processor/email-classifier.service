@@ -1,0 +1,35 @@
+[Unit]
+Description=Email Classification Worker
+Documentation=https://github.com/jokull/email-rag
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=jokull
+Group=jokull
+WorkingDirectory=/Users/jokull/Code/email-rag/services/email-processor
+ExecStart=/Users/jokull/Code/email-rag/services/email-processor/run_classifier.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=email-classifier
+
+# Environment variables
+Environment=DATABASE_URL=postgresql://email_user:email_pass@localhost:5432/email_rag
+Environment=LLM_MODEL_NAME=gpt-4o-mini
+Environment=MY_EMAIL=jokull@solberg.is
+Environment=BATCH_SIZE=10
+Environment=SLEEP_INTERVAL=30
+Environment=MAILBOX_FILTER=INBOX
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=false
+ProtectSystem=strict
+ReadWritePaths=/Users/jokull/Code/email-rag/services/email-processor
+
+[Install]
+WantedBy=multi-user.target

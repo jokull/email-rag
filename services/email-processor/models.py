@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, TIMESTAMP, Boolean, ForeignKey, LargeBinary
+from sqlalchemy import Column, Integer, String, Text, TIMESTAMP, Boolean, ForeignKey, LargeBinary, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
@@ -72,8 +72,9 @@ class Message(Base):
     # Participant information (normalized)
     participants = Column(JSONB, default=list)  # Array of {email, name} objects
     
-    # Email classification (from future AI step)
-    category = Column(Text)  # personal/promotion/automated
+    # Email classification (from AI step)
+    category = Column(Text)  # personal/promotional/automated
+    confidence = Column(Float)  # classification confidence score 0.0-1.0
     
     # Granular processing pipeline stages
     parsed_at = Column(TIMESTAMP)  # mail-parser completed
@@ -89,9 +90,9 @@ class Conversation(Base):
     __tablename__ = 'conversations'
     
     id = Column(Integer, primary_key=True)
-    thread_id = Column(Text, nullable=False)  # From threading logic
-    genesis_message_id = Column(Text)  # The first message that started the thread
-    subject_normalized = Column(Text)  # Normalized subject line
+    thread_id = Column(Text, nullable=False, unique=True)  # Unique thread identifier
+    genesis_message_id = Column(Text, nullable=False)  # Message-ID of first message in thread
+    subject_normalized = Column(Text, nullable=False)  # Normalized subject (Re:, Fwd: removed)
     
     # Conversation metadata
     participants = Column(JSONB, default=list)  # Denormalized participant list
@@ -99,8 +100,9 @@ class Conversation(Base):
     first_message_date = Column(TIMESTAMP)
     last_message_date = Column(TIMESTAMP)
     
-    # AI-generated summary (from future step)
+    # AI-generated summary (updated on each new message)
     summary = Column(Text)  # One-liner summary of the conversation
+    key_topics = Column(JSONB, default=list)  # Array of key topics/entities
     
     # Processing status
     summary_generated_at = Column(TIMESTAMP)

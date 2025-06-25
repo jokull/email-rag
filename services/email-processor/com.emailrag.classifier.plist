@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.emailrag.classifier</string>
+    
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jokull/Code/email-rag/services/email-processor/run_classifier.sh</string>
+    </array>
+    
+    <key>WorkingDirectory</key>
+    <string>/Users/jokull/Code/email-rag/services/email-processor</string>
+    
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DATABASE_URL</key>
+        <string>postgresql://email_user:email_pass@localhost:5432/email_rag</string>
+        <key>LLM_MODEL_NAME</key>
+        <string>gpt-4o-mini</string>
+        <key>MY_EMAIL</key>
+        <string>jokull@solberg.is</string>
+        <key>BATCH_SIZE</key>
+        <string>10</string>
+        <key>SLEEP_INTERVAL</key>
+        <string>30</string>
+        <key>MAILBOX_FILTER</key>
+        <string>INBOX</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <key>KeepAlive</key>
+    <true/>
+    
+    <key>StandardOutPath</key>
+    <string>/Users/jokull/Code/email-rag/services/email-processor/email_classifier_stdout.log</string>
+    
+    <key>StandardErrorPath</key>
+    <string>/Users/jokull/Code/email-rag/services/email-processor/email_classifier_stderr.log</string>
+    
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

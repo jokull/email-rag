@@ -8,6 +8,8 @@ import json
 
 from models import ImapMessage, Message, Contact
 from database import get_db_session
+from llm_classifier import get_llm_classifier, initialize_llm_classifier
+from threading_service import EmailThreadingService
 
 # We'll import the Rust email parser once it's built
 # from email_parser_py import parse_email_bytes
@@ -19,6 +21,12 @@ class EmailProcessor:
     
     def __init__(self):
         self.reply_parser = EmailReplyParser()
+        self.threading_service = EmailThreadingService()
+        
+        # Initialize LLM classifier (fail fast if not available)
+        logger.info("🤖 Initializing LLM classifier for email processor...")
+        if not initialize_llm_classifier():
+            raise RuntimeError("Failed to initialize LLM classifier. Cannot process emails without working classification.")
     
     def process_unprocessed_emails(self, limit: int = 100) -> int:
         """Process emails that haven't been parsed yet"""
@@ -43,7 +51,8 @@ class EmailProcessor:
             if target_mailbox != "ALL":
                 query = query.filter(ImapMailbox.name == target_mailbox)
             
-            unprocessed = query.limit(limit).all()
+            # Order by most recent first to prioritize new emails
+            unprocessed = query.order_by(ImapMessage.created_at.desc()).limit(limit).all()
             
             if target_mailbox == "ALL":
                 logger.info(f"Found {len(unprocessed)} unprocessed emails across all mailboxes")
@@ -397,3 +406,159 @@ class EmailProcessor:
                 'status_breakdown': status_counts,
                 'processing_rate': f"{total_processed}/{total_imap}" if total_imap > 0 else "0/0"
             }
+    
+    def process_unclassified_emails(self, limit: int = 100) -> int:
+        """Process emails that have been cleaned but not classified yet"""
+        classified_count = 0
+        
+        with get_db_session() as session:
+            # Find cleaned but unclassified messages, prioritize most recent first
+            unclassified = session.query(Message).filter(
+                Message.cleaned_at.isnot(None),  # Has been cleaned
+                Message.classified_at.is_(None),  # But not classified
+                Message.processing_status == 'completed'  # Successfully processed
+            ).order_by(Message.date_sent.desc()).limit(limit).all()
+            
+            logger.info(f"Found {len(unclassified)} unclassified messages to process")
+            
+            for message in unclassified:
+                try:
+                    if self.classify_single_message(session, message):
+                        classified_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to classify message {message.id}: {e}")
+                    # Mark classification as failed
+                    self._mark_classification_failed(session, message.id, str(e))
+        
+        return classified_count
+    
+    def classify_single_message(self, session: Session, message: Message) -> bool:
+        """Classify a single message using LLM classifier"""
+        try:
+            # Get LLM classifier instance
+            classifier = get_llm_classifier()
+            if not classifier.ready:
+                # Fail fast - no fallback allowed per user requirements
+                raise RuntimeError("LLM classifier not ready. Cannot classify without LLM.")
+            
+            # Classify the email using LLM
+            result = classifier.classify_email(
+                from_email=message.from_email or "",
+                subject=message.subject or "",
+                body=message.body_text or ""
+            )
+            
+            # Update message with classification results
+            message.category = result.category
+            message.confidence = result.confidence
+            message.classified_at = datetime.utcnow()
+            
+            # Process threading for personal emails
+            if result.category == 'personal':
+                try:
+                    thread_id = self.threading_service.process_message_threading(message, session)
+                    if thread_id:
+                        logger.info(f"Threaded personal message {message.id} into conversation {thread_id}")
+                except Exception as e:
+                    logger.error(f"Threading failed for message {message.id}: {e}")
+                    # Don't fail classification if threading fails
+            
+            session.commit()
+            
+            logger.info(f"Classified message {message.id}: {result.category} (confidence: {result.confidence:.2f})")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error classifying message {message.id}: {e}")
+            session.rollback()
+            return False
+    
+    def classify_batch_messages(self, messages: List[Message]) -> int:
+        """Classify multiple messages efficiently using LLM"""
+        if not messages:
+            return 0
+        
+        try:
+            classifier = get_llm_classifier()
+            if not classifier.ready:
+                # Fail fast - no fallback allowed per user requirements
+                raise RuntimeError("LLM classifier not ready. Cannot classify without LLM.")
+            
+            classified_count = 0
+            
+            # Process each message individually (LLM doesn't have batch support yet)
+            with get_db_session() as session:
+                for message in messages:
+                    try:
+                        # Refresh message in session
+                        session.merge(message)
+                        
+                        # Classify using LLM
+                        result = classifier.classify_email(
+                            from_email=message.from_email or "",
+                            subject=message.subject or "",
+                            body=message.body_text or ""
+                        )
+                        
+                        message.category = result.category
+                        message.confidence = result.confidence
+                        message.classified_at = datetime.utcnow()
+                        
+                        classified_count += 1
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to classify message {message.id} with LLM: {e}")
+                        raise  # Fail fast per user requirements
+                
+                session.commit()
+            
+            logger.info(f"LLM classified {classified_count}/{len(messages)} messages")
+            return classified_count
+            
+        except Exception as e:
+            logger.error(f"LLM batch classification failed: {e}")
+            raise  # Fail fast per user requirements
+    
+    def _mark_classification_failed(self, session: Session, message_id: int, error: str):
+        """Mark a message as failed classification - NO FALLBACK per user requirements"""
+        # Per user requirements: "DELETE the fallback code" and "We should not swallow the error either"
+        logger.error(f"Classification failed for message {message_id}: {error}")
+        raise RuntimeError(f"Classification failed for message {message_id}: {error}")
+    
+    def get_classification_stats(self) -> Dict[str, Any]:
+        """Get classification statistics"""
+        with get_db_session() as session:
+            # Count messages by classification status
+            total_cleaned = session.query(func.count(Message.id)).filter(
+                Message.cleaned_at.isnot(None)
+            ).scalar()
+            
+            total_classified = session.query(func.count(Message.id)).filter(
+                Message.classified_at.isnot(None)
+            ).scalar()
+            
+            pending_classification = total_cleaned - total_classified
+            
+            # Count by category
+            category_counts = dict(
+                session.query(Message.category, func.count(Message.id))
+                .filter(Message.category.isnot(None))
+                .group_by(Message.category)
+                .all()
+            )
+            
+            return {
+                'total_cleaned_messages': total_cleaned,
+                'total_classified_messages': total_classified,
+                'pending_classification': pending_classification,
+                'category_breakdown': category_counts,
+                'classification_rate': f"{total_classified}/{total_cleaned}" if total_cleaned > 0 else "0/0"
+            }
+    
+    def process_unthreaded_personal_emails(self, limit: int = 100) -> int:
+        """Process threading for personal emails that haven't been threaded yet"""
+        return self.threading_service.process_unthreaded_personal_messages(limit)
+    
+    def get_threading_stats(self) -> Dict[str, Any]:
+        """Get threading statistics"""
+        return self.threading_service.get_threading_stats()

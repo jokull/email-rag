@@ -1,0 +1,163 @@
+{
+  "analysis_date": "2025-06-25T20:15:11.852121",
+  "mailbox_stats": {
+    "mailboxes": [
+      {
+        "name": "INBOX",
+        "message_count": 19091,
+        "processed_count": 19091,
+        "processing_rate": 100.0,
+        "min_date": "2015-12-12 22:14:15+00:00",
+        "max_date": "2025-06-25 19:46:01+00:00",
+        "uidvalidity": 1528719951,
+        "uidnext": 1
+      },
+      {
+        "name": "Archive",
+        "message_count": 60492,
+        "processed_count": 0,
+        "processing_rate": 0.0,
+        "min_date": "2005-01-06 21:08:15+00:00",
+        "max_date": "2025-05-25 10:41:23+00:00",
+        "uidvalidity": 1528719963,
+        "uidnext": 1
+      },
+      {
+        "name": "Backup",
+        "message_count": 0,
+        "processed_count": 0,
+        "processing_rate": 0,
+        "min_date": "N/A",
+        "max_date": "N/A",
+        "uidvalidity": 1528721770,
+        "uidnext": 1
+      },
+      {
+        "name": "Drafts",
+        "message_count": 0,
+        "processed_count": 0,
+        "processing_rate": 0,
+        "min_date": "N/A",
+        "max_date": "N/A",
+        "uidvalidity": 1528719954,
+        "uidnext": 1
+      },
+      {
+        "name": "Eignavaktin",
+        "message_count": 0,
+        "processed_count": 0,
+        "processing_rate": 0,
+        "min_date": "N/A",
+        "max_date": "N/A",
+        "uidvalidity": 1647532803,
+        "uidnext": 1
+      },
+      {
+        "name": "Facebook",
+        "message_count": 387,
+        "processed_count": 0,
+        "processing_rate": 0.0,
+        "min_date": "2012-06-23 11:15:28+00:00",
+        "max_date": "2025-06-20 09:02:34+00:00",
+        "uidvalidity": 1586342916,
+        "uidnext": 1
+      },
+      {
+        "name": "Factsheet",
+        "message_count": 61,
+        "processed_count": 0,
+        "processing_rate": 0.0,
+        "min_date": "2005-11-03 20:49:41+00:00",
+        "max_date": "2010-01-07 18:31:40+00:00",
+        "uidvalidity": 1528721825,
+        "uidnext": 1
+      },
+      {
+        "name": "Lauf\u00e1sborg",
+        "message_count": 74,
+        "processed_count": 0,
+        "processing_rate": 0.0,
+        "min_date": "2022-12-12 10:42:04+00:00",
+        "max_date": "2025-06-17 17:10:12+00:00",
+        "uidvalidity": 1669885022,
+        "uidnext": 1
+      },
+      {
+        "name": "Mentor",
+        "message_count": 813,
+        "processed_count": 0,
+        "processing_rate": 0.0,
+        "min_date": "2016-10-18 16:18:15+00:00",
+        "max_date": "2025-06-19 14:17:00+00:00",
+        "uidvalidity": 1669884532,
+        "uidnext": 1
+      },
+      {
+        "name": "Reading",
+        "message_count": 10660,
+        "processed_count": 0,
+        "processing_rate": 0.0,
+        "min_date": "2014-03-17 02:42:26+00:00",
+        "max_date": "2025-06-25 17:35:07+00:00",
+        "uidvalidity": 1528727547,
+        "uidnext": 1
+      },
+      {
+        "name": "Sent",
+        "message_count": 18161,
+        "processed_count": 0,
+        "processing_rate": 0.0,
+        "min_date": "2005-01-06 21:08:15+00:00",
+        "max_date": "2025-06-21 16:24:39+00:00",
+        "uidvalidity": 1528719953,
+        "uidnext": 1
+      },
+      {
+        "name": "Spam",
+        "message_count": 2031,
+        "processed_count": 0,
+        "processing_rate": 0.0,
+        "min_date": "2018-06-13 01:07:12+00:00",
+        "max_date": "2025-06-25 18:10:43+00:00",
+        "uidvalidity": 1528719962,
+        "uidnext": 1
+      },
+      {
+        "name": "Trash",
+        "message_count": 0,
+        "processed_count": 0,
+        "processing_rate": 0,
+        "min_date": "N/A",
+        "max_date": "N/A",
+        "uidvalidity": 1528719952,
+        "uidnext": 1
+      }
+    ],
+    "total_messages": 111770,
+    "total_processed": 19091,
+    "overall_processing_rate": 17.0806119710119,
+    "current_filter": "INBOX"
+  },
+  "email_patterns": {
+    "category_by_mailbox": {
+      "INBOX": {
+        "automated": 571,
+        "promotional": 428,
+        "personal": 1
+      }
+    },
+    "sender_counts": {
+      "automated": 152,
+      "promotional": 94,
+      "personal": 1
+    }
+  },
+  "recommendations": [
+    "\ud83d\udd0d Currently filtering to 'INBOX' mailbox only. Consider expanding to capture personal emails from other mailboxes.",
+    "\ud83d\udce7 Found 18,161 messages in Sent folder. These contain your outgoing personal emails and should be included for complete conversations.",
+    "\ud83d\udcc1 Found 60,492 messages in Archive folder. These may contain important personal emails that were archived.",
+    "\u26a0\ufe0f Found 6 mailboxes with low processing rates. Consider investigating why these aren't being processed.",
+    "\ud83d\udcc8 Found 4 non-inbox mailboxes with >1000 messages. These may contain valuable personal emails: Archive, Reading, Sent, Spam"
+  ],
+  "current_filter": "INBOX"
+}

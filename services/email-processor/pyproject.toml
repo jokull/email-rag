@@ -1,19 +1,15 @@
-[build-system]
-requires = ["maturin>=1.0,<2.0"]
-build-backend = "maturin"
-
 [project]
-name = "email-parser-py"
+name = "email-classifier"
 version = "0.1.0"
-description = "Fast email parsing using Rust mail-parser crate"
-authors = [{name = "Email RAG System"}]
-license = {text = "MIT"}
-requires-python = ">=3.8"
-classifiers = [
-    "Programming Language :: Rust",
-    "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
+description = "Email classification service"
+requires-python = ">=3.10"
+dependencies = [
+    "llm>=0.15",
+    "sqlalchemy>=2.0.35",
+    "psycopg2-binary>=2.9.10",
+    "email-reply-parser>=0.5.12",
 ]
 
-[tool.maturin]
-features = ["pyo3/extension-module"]
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"

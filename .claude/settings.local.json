@@ -35,7 +35,12 @@
       "Bash(cargo check:*)",
       "Bash(chmod:*)",
       "Bash(/Users/jokull/Code/email-rag/scripts/trigger_processing.sh:*)",
-      "Bash(/Users/jokull/Code/email-rag/scripts/monitor_email_processor.sh:*)"
+      "Bash(/Users/jokull/Code/email-rag/scripts/monitor_email_processor.sh:*)",
+      "Bash(./scripts/monitor_email_processor.sh:*)",
+      "WebFetch(domain:huggingface.co)",
+      "WebFetch(domain:llm.datasette.io)",
+      "Bash(python scripts/analyze_classification.py:*)",
+      "Bash(python test:*)"
     ],
     "deny": []
   }

@@ -1,10 +1,26 @@
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-sqlalchemy==2.0.23
-psycopg2-binary==2.9.9
+# Core API dependencies
+fastapi==0.115.0
+uvicorn[standard]==0.32.1
+sqlalchemy==2.0.35
+psycopg2-binary==2.9.10
+python-dotenv==1.0.1
+pydantic==2.10.0
+pydantic-settings==2.7.0
+requests==2.32.3
+
+# Email processing dependencies
 email-reply-parser==0.5.12
-python-dotenv==1.0.0
-pydantic==2.5.0
-pydantic-settings==2.1.0
-requests==2.31.0
+
+# ML/AI dependencies - latest versions
+setfit==1.1.2
+transformers==4.52.4
+sentence-transformers==4.1.0
+huggingface-hub==0.33.1
+torch==2.7.1
+scikit-learn==1.7.0
+
+# LLM dependencies - modern model management
+llm==0.15
+
+# Rust build tools (optional)
 maturin==1.4.0
