@@ -22,17 +22,33 @@ class EmailProcessor:
     
     def process_unprocessed_emails(self, limit: int = 100) -> int:
         """Process emails that haven't been parsed yet"""
+        import os
+        
         processed_count = 0
         
+        # Get mailbox filter from environment (default to "Inbox")
+        target_mailbox = os.getenv("MAILBOX_FILTER", "Inbox")
+        
         with get_db_session() as session:
-            # Find unprocessed IMAP messages
-            unprocessed = session.query(ImapMessage).filter(
+            # Find unprocessed IMAP messages filtered by mailbox
+            from models import ImapMailbox
+            
+            query = session.query(ImapMessage).select_from(ImapMessage).join(ImapMailbox, ImapMessage.mailbox_id == ImapMailbox.id).filter(
                 ~session.query(Message.imap_message_id).filter(
                     Message.imap_message_id == ImapMessage.id
                 ).exists()
-            ).limit(limit).all()
+            )
             
-            logger.info(f"Found {len(unprocessed)} unprocessed emails")
+            # Apply mailbox filter
+            if target_mailbox != "ALL":
+                query = query.filter(ImapMailbox.name == target_mailbox)
+            
+            unprocessed = query.limit(limit).all()
+            
+            if target_mailbox == "ALL":
+                logger.info(f"Found {len(unprocessed)} unprocessed emails across all mailboxes")
+            else:
+                logger.info(f"Found {len(unprocessed)} unprocessed emails in '{target_mailbox}' mailbox")
             
             for imap_msg in unprocessed:
                 try:
@@ -58,8 +74,8 @@ class EmailProcessor:
             return True
         
         try:
-            # Parse email using Rust bindings (placeholder for now)
-            parsed_email = self._parse_email_with_rust(imap_msg.raw_message)
+            # Parse email using Python email library
+            parsed_email = self._parse_email_with_python(imap_msg.raw_message)
             
             # Clean the email body
             cleaned_body = self._clean_email_body(parsed_email.get('body_text', ''))
@@ -149,50 +165,88 @@ class EmailProcessor:
             # Log but don't fail the main processing
             logger.warning(f"Failed to upsert contact {email}: {e}")
     
-    def _parse_email_with_rust(self, raw_bytes: bytes) -> Dict[str, Any]:
-        """Parse email using Rust bindings"""
-        try:
-            # Import the Rust email parser
-            from email_parser_py import parse_email_bytes
-            
-            # Parse email using Rust bindings
-            parsed = parse_email_bytes(raw_bytes)
-            return parsed.to_dict()
-            
-        except ImportError as e:
-            logger.warning(f"Rust email parser not available, falling back to Python: {e}")
-            return self._parse_email_with_python_fallback(raw_bytes)
-        except Exception as e:
-            logger.error(f"Failed to parse email with Rust parser: {e}")
-            return self._parse_email_with_python_fallback(raw_bytes)
+    def _parse_email_with_python(self, raw_bytes: bytes) -> Dict[str, Any]:
+        """Parse email using Python email library"""
+        return self._parse_email_with_python_implementation(raw_bytes)
     
-    def _parse_email_with_python_fallback(self, raw_bytes: bytes) -> Dict[str, Any]:
+    def _parse_email_with_python_implementation(self, raw_bytes: bytes) -> Dict[str, Any]:
         """Fallback Python email parsing implementation"""
         import email
         from email.utils import parseaddr, getaddresses
+        from email.header import decode_header
+        
+        def decode_mime_header(header_value):
+            """Decode MIME-encoded header values like =?UTF-8?Q?...?="""
+            if not header_value:
+                return header_value
+            
+            # Handle Header objects by converting to string first
+            if hasattr(header_value, '__str__'):
+                header_value = str(header_value)
+            
+            try:
+                decoded_parts = decode_header(header_value)
+                decoded_string = ""
+                for part, encoding in decoded_parts:
+                    if isinstance(part, bytes):
+                        if encoding and encoding.lower() != 'unknown-8bit':
+                            try:
+                                decoded_string += part.decode(encoding, errors='ignore')
+                            except (LookupError, UnicodeDecodeError):
+                                # Fallback to utf-8 for unknown/invalid encodings
+                                decoded_string += part.decode('utf-8', errors='ignore')
+                        else:
+                            # Handle unknown-8bit or no encoding
+                            decoded_string += part.decode('utf-8', errors='ignore')
+                    else:
+                        decoded_string += str(part)
+                return decoded_string.strip()
+            except Exception as e:
+                logger.warning(f"Failed to decode header '{header_value}': {e}")
+                return str(header_value) if header_value else ""
+        
+        def decode_address_header(header_value):
+            """Decode address headers with proper MIME decoding"""
+            if not header_value:
+                return []
+            
+            try:
+                addresses = getaddresses([header_value])
+                decoded_addresses = []
+                for name, email_addr in addresses:
+                    decoded_name = decode_mime_header(name) if name else None
+                    decoded_addresses.append((decoded_name, email_addr))
+                return decoded_addresses
+            except Exception as e:
+                logger.warning(f"Failed to decode address header '{header_value}': {e}")
+                return []
         
         try:
             msg = email.message_from_bytes(raw_bytes)
             
-            # Extract participants
+            # Extract participants with proper decoding
             participants = []
             
             # From address
-            from_addr = parseaddr(msg.get('From', ''))
-            if from_addr[1]:  # email exists
-                participants.append({'email': from_addr[1], 'name': from_addr[0] or None})
+            from_header = msg.get('From', '')
+            from_addrs = decode_address_header(from_header)
+            for name, email_addr in from_addrs:
+                if email_addr:
+                    participants.append({'email': email_addr, 'name': name})
             
             # To addresses
-            to_addrs = getaddresses([msg.get('To', '')])
+            to_header = msg.get('To', '')
+            to_addrs = decode_address_header(to_header)
             for name, email_addr in to_addrs:
                 if email_addr:
-                    participants.append({'email': email_addr, 'name': name or None})
+                    participants.append({'email': email_addr, 'name': name})
             
             # CC addresses
-            cc_addrs = getaddresses([msg.get('Cc', '')])
+            cc_header = msg.get('Cc', '')
+            cc_addrs = decode_address_header(cc_header)
             for name, email_addr in cc_addrs:
                 if email_addr:
-                    participants.append({'email': email_addr, 'name': name or None})
+                    participants.append({'email': email_addr, 'name': name})
             
             # Extract body text
             body_text = ""
@@ -202,29 +256,43 @@ class EmailProcessor:
                         payload = part.get_payload(decode=True)
                         if payload:
                             body_text = payload.decode('utf-8', errors='ignore')
+                            # Remove NULL bytes which cause PostgreSQL errors
+                            body_text = body_text.replace('\x00', '')
                             break
             else:
                 payload = msg.get_payload(decode=True)
                 if payload:
                     body_text = payload.decode('utf-8', errors='ignore')
+                    # Remove NULL bytes which cause PostgreSQL errors
+                    body_text = body_text.replace('\x00', '')
+            
+            # Get first from address for main fields
+            main_from_email = from_addrs[0][1] if from_addrs else ''
+            main_from_name = from_addrs[0][0] if from_addrs else None
+            
+            # Extract headers safely
+            raw_subject = msg.get('Subject', '')
+            raw_reply_to = msg.get('Reply-To', '')
+            raw_thread_topic = msg.get('Thread-Topic', '')
             
             return {
                 'message_id': msg.get('Message-ID', ''),
-                'subject': msg.get('Subject', ''),
-                'from_email': from_addr[1] if from_addr[1] else '',
+                'subject': decode_mime_header(raw_subject) or '',
+                'from_email': main_from_email,
+                'from_name': main_from_name,
                 'to_emails': [addr[1] for addr in to_addrs if addr[1]],
                 'cc_emails': [addr[1] for addr in cc_addrs if addr[1]],
-                'reply_to': msg.get('Reply-To'),
+                'reply_to': decode_mime_header(raw_reply_to) if raw_reply_to else None,
                 'references': msg.get('References'),
                 'in_reply_to': msg.get('In-Reply-To'),
-                'thread_topic': msg.get('Thread-Topic'),
+                'thread_topic': decode_mime_header(raw_thread_topic) if raw_thread_topic else None,
                 'date_sent': msg.get('Date'),
                 'body_text': body_text,
                 'body_html': None,  # TODO: Extract HTML body
                 'participants': participants
             }
         except Exception as e:
-            logger.error(f"Failed to parse email with Python fallback parser: {e}")
+            logger.error(f"Failed to parse email with Python parser: {e}")
             return {}
     
     def _clean_email_body(self, body_text: str) -> str:
@@ -235,7 +303,13 @@ class EmailProcessor:
         try:
             # Remove quoted replies and signatures
             cleaned = EmailReplyParser.parse_reply(body_text)
-            return cleaned.strip() if cleaned else body_text
+            result = cleaned.strip() if cleaned else body_text
+            
+            # Debug: Log when quotes are removed
+            if len(result) < len(body_text) * 0.8:  # More than 20% reduction
+                logger.info(f"Removed quotes: {len(body_text)} -> {len(result)} chars")
+            
+            return result
         except Exception as e:
             logger.warning(f"Failed to clean email body: {e}")
             return body_text
@@ -283,9 +357,31 @@ class EmailProcessor:
     
     def get_processing_stats(self) -> Dict[str, Any]:
         """Get processing statistics"""
+        import os
+        
+        # Get mailbox filter from environment (default to "Inbox")
+        target_mailbox = os.getenv("MAILBOX_FILTER", "Inbox")
+        
         with get_db_session() as session:
-            total_imap = session.query(func.count(ImapMessage.id)).scalar()
+            from models import ImapMailbox
+            
+            # Count total IMAP messages (filtered by mailbox)
+            imap_query = session.query(func.count(ImapMessage.id)).select_from(ImapMessage).join(ImapMailbox, ImapMessage.mailbox_id == ImapMailbox.id)
+            if target_mailbox != "ALL":
+                imap_query = imap_query.filter(ImapMailbox.name == target_mailbox)
+            total_imap = imap_query.scalar()
+            
+            # Count processed messages (all processed, regardless of filter)
             total_processed = session.query(func.count(Message.id)).scalar()
+            
+            # Count pending messages (total - processed)
+            processed_imap_ids = session.query(Message.imap_message_id).subquery()
+            pending_query = session.query(func.count(ImapMessage.id)).select_from(ImapMessage).join(ImapMailbox, ImapMessage.mailbox_id == ImapMailbox.id).filter(
+                ~ImapMessage.id.in_(session.query(processed_imap_ids.c.imap_message_id))
+            )
+            if target_mailbox != "ALL":
+                pending_query = pending_query.filter(ImapMailbox.name == target_mailbox)
+            pending_in_target = pending_query.scalar()
             
             status_counts = dict(
                 session.query(Message.processing_status, func.count(Message.id))
@@ -294,9 +390,10 @@ class EmailProcessor:
             )
             
             return {
+                'mailbox_filter': target_mailbox,
                 'total_imap_messages': total_imap,
                 'total_processed_messages': total_processed,
-                'pending_messages': total_imap - total_processed,
+                'pending_messages': pending_in_target,
                 'status_breakdown': status_counts,
                 'processing_rate': f"{total_processed}/{total_imap}" if total_imap > 0 else "0/0"
             }

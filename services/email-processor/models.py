@@ -7,6 +7,18 @@ from typing import Optional, List, Dict, Any
 
 Base = declarative_base()
 
+class ImapMailbox(Base):
+    """IMAP mailboxes table - read-only for our service"""
+    __tablename__ = 'imap_mailboxes'
+    
+    id = Column(Integer, primary_key=True)
+    username = Column(String, nullable=False)
+    name = Column(String, nullable=False)  # Mailbox name like "Inbox", "Sent", etc.
+    uidvalidity = Column(Integer, nullable=False)
+    uidnext = Column(Integer, default=1)
+    special_use = Column(JSONB)
+    created_at = Column(TIMESTAMP, server_default=func.now())
+
 class ImapMessage(Base):
     """IMAP messages table - read-only for our service"""
     __tablename__ = 'imap_messages'
@@ -15,12 +27,12 @@ class ImapMessage(Base):
     mailbox_id = Column(Integer, nullable=False)
     uid = Column(Integer, nullable=False)
     flags = Column(JSONB, default=list)
-    internal_date = Column(TIMESTAMP(timezone=True), nullable=False)
+    internal_date = Column(TIMESTAMP, nullable=False)
     size = Column(Integer, nullable=False)
     body_structure = Column(JSONB)
     envelope = Column(JSONB)
     raw_message = Column(LargeBinary)  # The raw email bytes we'll parse
-    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    created_at = Column(TIMESTAMP, server_default=func.now())
 
 class Contact(Base):
     """Contacts table for normalized email/name management"""
@@ -29,8 +41,8 @@ class Contact(Base):
     email = Column(Text, primary_key=True)  # Normalized email address
     name = Column(Text)  # Optional current display name
     seen_names = Column(JSONB, default=list)  # Array of historical names seen
-    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
-    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    updated_at = Column(TIMESTAMP, server_default=func.now())
 
 class Message(Base):
     """Messages table - cleaned and parsed emails from imap_messages"""
@@ -50,8 +62,8 @@ class Message(Base):
     email_references = Column(Text)  # References header (renamed from 'references' to avoid SQL keyword)
     in_reply_to = Column(Text)  # In-Reply-To header
     thread_topic = Column(Text)  # Thread-Topic header if present
-    date_sent = Column(TIMESTAMP(timezone=True), nullable=False)
-    date_received = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    date_sent = Column(TIMESTAMP, nullable=False)
+    processed_at = Column(TIMESTAMP, server_default=func.now())
     
     # Cleaned content from mail-parser + email_reply_parser
     body_text = Column(Text)  # Cleaned plaintext body
@@ -64,13 +76,13 @@ class Message(Base):
     category = Column(Text)  # personal/promotion/automated
     
     # Granular processing pipeline stages
-    parsed_at = Column(TIMESTAMP(timezone=True))  # mail-parser completed
-    cleaned_at = Column(TIMESTAMP(timezone=True))  # email_reply_parser completed
-    classified_at = Column(TIMESTAMP(timezone=True))  # AI categorization completed
-    embedded_at = Column(TIMESTAMP(timezone=True))  # Unstructured + embeddings completed
+    parsed_at = Column(TIMESTAMP)  # mail-parser completed
+    cleaned_at = Column(TIMESTAMP)  # email_reply_parser completed
+    classified_at = Column(TIMESTAMP)  # AI categorization completed
+    embedded_at = Column(TIMESTAMP)  # Unstructured + embeddings completed
     processing_status = Column(Text, default='pending')  # pending/processing/completed/failed
-    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
-    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    updated_at = Column(TIMESTAMP, server_default=func.now())
 
 class Conversation(Base):
     """Conversations table - threaded email conversations"""
@@ -84,13 +96,13 @@ class Conversation(Base):
     # Conversation metadata
     participants = Column(JSONB, default=list)  # Denormalized participant list
     message_count = Column(Integer, default=0)
-    first_message_date = Column(TIMESTAMP(timezone=True))
-    last_message_date = Column(TIMESTAMP(timezone=True))
+    first_message_date = Column(TIMESTAMP)
+    last_message_date = Column(TIMESTAMP)
     
     # AI-generated summary (from future step)
     summary = Column(Text)  # One-liner summary of the conversation
     
     # Processing status
-    summary_generated_at = Column(TIMESTAMP(timezone=True))
-    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
-    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    summary_generated_at = Column(TIMESTAMP)
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    updated_at = Column(TIMESTAMP, server_default=func.now())
