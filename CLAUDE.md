@@ -1,73 +1,57 @@
 # Email RAG System - Claude Instructions
 
 ## Project Overview
-This is a self-hosted email RAG system that syncs IMAP emails to PostgreSQL, processes them with ML-based threading and classification, and provides a modern React UI for conversation management.
 
-## Architecture
-- **IMAP Sync**: go-imap-sql syncs emails to PostgreSQL with FSStore for raw email storage
-- **Database**: PostgreSQL with pgvector for vector embeddings
-- **Email Scorer**: Lightweight Qwen-0.5B service for rapid email triage and multi-dimensional scoring
-- **Content Processor**: Queue-based service using Unstructured.io for HTML email processing and embeddings
-- **Threading**: Python service with JWZ + BERT-based ML threading (90%+ accuracy)
-- **UI**: React with TanStack Router, Zero for real-time sync, @tanstack/react-virtual
-- **Icons**: justd-icons (IntentUI icons)
-- **Runtime**: Bun (not Node.js)
+This is a self-hosted email RAG system that syncs IMAP emails to PostgreSQL, processes them with
+ML-based threading and classification, and provides a modern React UI for conversation management.
 
-## 🧠 LLM Agent Configuration: Qwen-0.5B on Mac mini M2 (16GB RAM)
+Pipeline:
 
-### Model Setup
-- **Model**: Qwen-0.5B (GGUF quantized Q4_0)
-- **Disk Size**: ~395 MB
-- **RAM at Runtime**: ~0.5–1.5 GB (incl. context buffers)
-- **Machine**: Apple Mac mini M2, 16GB unified memory
-- **Acceleration**: Metal GPU / Apple Neural Engine (via llama.cpp)
+1. IMAP Sync: `go-imap-sql` dumps emails to Postgres (pgvector) - main table is `imap_messages`
+2. Cleaning:
+   1. Python bindings with Rust library `mail-parser`
+      1. Extracts plaintext version in UTF-8
+      2. Extracts participants with normalized email addresses, date, message-id, thread-id, from,
+         to, cc, reply-to, thread-topic, references etc.
+   2. Python library `email_reply_parser` removes threaded responses and signatures from plaintext
+      bodies
+   3. Result is saved in the `clean_messages` and participants are saved in JSONB column with proper
+      indexes Notes. Attachments, unprocessable raw bodies, HTML are all ignored and discarded.
+3. Classification:
+   1. Qwen-0.5B model pulls `clean_messages` and is prompted "Is this email
+      human/promotional/transactional? Respond only with one of those words" and the `category`
+      column is updated in `clean_messages`.
+   2. SQL lookups on headers establish if this is _in reply to to existing email_ (threading), and a
+      thread is created based on the "genesis message id" (`conversations` table)
+   3. The thread table also has a denormalized `participants` JSONB that is kept up to date
+   4. Another Qwen prompt summarizes in a one-liner the thread and saves in the `conversations`
+      table as `summary`
+4. Chunking & Embedding
+   1. When clean messages are labeled "human" a service pulls messages and uses Unstructured service
+      (docker-to-docker comms)
+   2. Unstructured returns a list of vector embeddings per message and saves with known pgvector
+      patterns
+5. UI
+   1. To be decided
 
-### Ideal Use Cases
-- ✅ Multi-dimensional email scoring: importance, sentiment, commercial, human detection
-- ✅ Rapid email triage and intelligent queue processing
-- ✅ HTML email content extraction with Unstructured.io
-- ✅ Semantic email chunking with structure preservation
-- ✅ Element-level embeddings for enhanced RAG retrieval
-- ✅ Queue-based processing with priority scoring
+## Current state
 
-### New Pipeline Architecture
-1. **IMAP → PostgreSQL**: Raw email ingestion
-2. **Email Scorer**: Qwen-0.5B rapid scoring (sentiment, importance, commercial, human)
-3. **Queue Management**: Priority-based content processing queue
-4. **Content Processor**: Unstructured.io + embeddings for qualifying emails
-5. **pgvector**: Enhanced vector storage with element-level granularity
+- Mail sync works great. An outdated ai-processor container service gives examples of how to get
+  Qwen running.
+- What's working well is imap-sync, postgres, the Unstructured container (and ai-processor insofar
+  as I'm able to use qwen which I want to use)
+-
 
-### Resource Allocation (Mac mini M2 16GB)
-- **Email Scorer**: ~1GB RAM (rapid triage)
-- **Content Processor**: ~2GB RAM (Unstructured + embeddings)
-- **Legacy AI Processor**: ~1GB RAM (reduced scope)
-- **Total**: ~4GB RAM for AI services (25% of system memory)
+## Migrations
 
-## Key Commands
-- Start services: `docker-compose up -d`
-- **Restart and wait for readiness**: `./scripts/restart_and_wait.sh` (recommended for development)
-- Format/lint/typecheck: `cd web && bun format lint:fix typecheck`
-- Build UI: `cd web && bun run build`
-
-## Development Scripts
-- `./scripts/restart_and_wait.sh` - Restarts Docker services and waits for full readiness using log heuristics
-- `./scripts/email_rag_overview.py` - System overview with statistics and health metrics
-- `./scripts/conversation_viewer.py` - View email threads with classification data
-- `./scripts/pipeline_monitor.py` - Monitor processing pipeline performance
-
-## Database Schema
-Core tables: `emails`, `threads`, `conversations`, `conversation_turns`, `cleaned_emails`, `embeddings`, `classifications`
-
-## Development Notes
-- Keep things simple for self-hosting - avoid production complexity
-- Zero cache server runs as `rocicorp/zero:{version}` Docker container
-- Thread processor uses Talon library for production-grade email cleaning
-- UI based on zbugs patterns with virtualization and real-time filtering
-- Classification scores: Human/Personal/Relevance for RAG pipeline filtering
+- Never recreate imap\_ tables - mail sync will take too long and this part will remain as-is
+- Recreate other tables like
 
 ## Package Management
+
 - Use uv for python packages
 - Modern Python tooling with uv for fast, reliable dependency management
 
 ## Deployment Tips
+
 - Use container targeting when running the restart script

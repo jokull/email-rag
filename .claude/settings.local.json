@@ -30,7 +30,12 @@
       "Bash(docker stats:*)",
       "Bash(python scripts/email_rag_overview.py:*)",
       "Bash(rg:*)",
-      "Bash(./scripts/restart_and_wait.sh:*)"
+      "Bash(./scripts/restart_and_wait.sh:*)",
+      "WebFetch(domain:pypi.org)",
+      "Bash(cargo check:*)",
+      "Bash(chmod:*)",
+      "Bash(/Users/jokull/Code/email-rag/scripts/trigger_processing.sh:*)",
+      "Bash(/Users/jokull/Code/email-rag/scripts/monitor_email_processor.sh:*)"
     ],
     "deny": []
   }

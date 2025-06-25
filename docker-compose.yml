@@ -81,25 +81,46 @@ services:
   #     timeout: 10s
   #     retries: 3
 
-  # Simple classifier service - lightweight rule-based classification
-  simple-classifier:
-    build: ./services/simple-classifier
+
+  # Email processing service - Cleans and processes emails from IMAP
+  email-processor:
+    build: 
+      context: ./services/email-processor
+      dockerfile: Dockerfile.python-only
     environment:
-      DATABASE_URL: postgresql://email_user:email_pass@postgres:5432/email_rag?sslmode=disable
-      PROCESSING_INTERVAL: ${PROCESSING_INTERVAL:-10}
-      BATCH_SIZE: ${BATCH_SIZE:-5}
+      DATABASE_URL: postgresql://email_user:email_pass@postgres:5432/email_rag
+      HOST: 0.0.0.0
+      PORT: 8080
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      POLL_INTERVAL: ${POLL_INTERVAL:-30}
+      BATCH_SIZE: ${BATCH_SIZE:-50}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Email processing worker - Background worker for email processing
+  email-processor-worker:
+    build: 
+      context: ./services/email-processor
+      dockerfile: Dockerfile.python-only
+    command: ["python", "worker.py"]
+    environment:
+      DATABASE_URL: postgresql://email_user:email_pass@postgres:5432/email_rag
+      POLL_INTERVAL: ${POLL_INTERVAL:-30}
+      BATCH_SIZE: ${BATCH_SIZE:-50}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     depends_on:
       postgres:
         condition: service_healthy
-    ports:
-      - "8083:8083"
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8083/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
   # Unstructured.io service - Official Docker image as library container
   unstructured:
@@ -118,76 +139,7 @@ services:
     # Keep container running for library access
     command: ["tail", "-f", "/dev/null"]
 
-  # Content processor service - Lightweight API consumer + embeddings
-  content-processor:
-    build: ./services/content-processor
-    environment:
-      DATABASE_URL: postgresql://email_user:email_pass@postgres:5432/email_rag?sslmode=disable
-      # Content processing configuration
-      PROCESSING_INTERVAL: ${PROCESSING_INTERVAL:-10}
-      PROCESSING_BATCH_SIZE: ${PROCESSING_BATCH_SIZE:-5}
-      EMBEDDING_MODEL: sentence-transformers/all-MiniLM-L6-v2
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      unstructured:
-        condition: service_started
-    volumes:
-      - content_logs:/app/logs
-      - /var/run/docker.sock:/var/run/docker.sock
-    ports:
-      - "8082:8082"
-    # Resource limits for content processing (lighter since no local Unstructured)
-    deploy:
-      resources:
-        limits:
-          memory: 1G  # Reduced memory - only embeddings + API calls
-        reservations:
-          memory: 512M
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8082/health')"]
-      interval: 30s
-      timeout: 15s
-      retries: 3
 
-  # Email threading and cleaning service - Uses Talon for production-grade email cleaning
-  ai-processor:
-    build: ./services/ai-processor
-    environment:
-      DATABASE_URL: postgresql://email_user:email_pass@postgres:5432/email_rag?sslmode=disable
-      # Threading and cleaning configuration
-      PROCESSING_INTERVAL: ${PROCESSING_INTERVAL:-30}
-      BATCH_SIZE: ${BATCH_SIZE:-10}
-      # Use Talon for cleaning, basic classification if no Qwen model
-      ENABLE_TALON_CLEANING: true
-      FALLBACK_TO_BASIC_CLASSIFICATION: false
-      UVICORN_RELOAD: false
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ai_logs:/app/logs
-      - llm_models:/app/models  # Preserve model storage
-      # Development: mount source code for live reloading (excluding models)
-      - ./services/ai-processor:/app:delegated
-    ports:
-      - "8080:8080"
-    # Resource limits for threading and cleaning only
-    deploy:
-      resources:
-        limits:
-          memory: 512M  # Much lighter without LLM
-        reservations:
-          memory: 256M
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8080/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
   # Zero cache server for real-time UI sync (disabled for debugging)
   # zero-cache:
@@ -215,11 +167,7 @@ services:
 
 volumes:
   postgres_data:
-  llm_models:    # Qwen-0.5B model storage (shared across services)
-  email_store:   # Raw email storage for go-imap-sql  
-  ai_logs:       # Legacy AI processor logs
-  scorer_logs:   # Email scorer logs
-  content_logs:  # Content processor logs
+  email_store:   # Raw email storage for go-imap-sql
 
 networks:
   default:
