@@ -11,7 +11,7 @@ from typing import Dict, List, Tuple
 import argparse
 
 # Add the email-processor directory to path
-sys.path.append('/Users/jokull/Code/email-rag/services/email-processor')
+sys.path.append('/Users/jokull/Code/email-rag/email-processor')
 
 from database import get_db_session
 from models import Message

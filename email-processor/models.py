@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, Text, TIMESTAMP, Boolean, Foreig
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
+from pgvector.sqlalchemy import Vector
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
@@ -76,6 +77,10 @@ class Message(Base):
     category = Column(Text)  # personal/promotional/automated
     confidence = Column(Float)  # classification confidence score 0.0-1.0
     
+    # Language classification
+    language = Column(Text)  # ISO 639-1 language code (en, es, fr, etc.)
+    language_confidence = Column(Float)  # language detection confidence score 0.0-1.0
+    
     # Granular processing pipeline stages
     parsed_at = Column(TIMESTAMP)  # mail-parser completed
     cleaned_at = Column(TIMESTAMP)  # email_reply_parser completed
@@ -108,3 +113,23 @@ class Conversation(Base):
     summary_generated_at = Column(TIMESTAMP)
     created_at = Column(TIMESTAMP, server_default=func.now())
     updated_at = Column(TIMESTAMP, server_default=func.now())
+
+class MessageChunk(Base):
+    """Message chunks table - for RAG embeddings storage"""
+    __tablename__ = 'message_chunks'
+    
+    id = Column(Integer, primary_key=True)
+    message_id = Column(Integer, ForeignKey('messages.id', ondelete='CASCADE'), nullable=False)
+    chunk_index = Column(Integer, nullable=False)  # Order within the message
+    text_content = Column(Text, nullable=False)  # The chunked text
+    
+    # Unstructured.io metadata
+    element_type = Column(Text)  # Title, NarrativeText, etc.
+    chunk_metadata = Column(JSONB, default=dict)  # Additional unstructured metadata
+    
+    # Vector embedding (384 dimensions for all-MiniLM-L6-v2)
+    embedding = Column(Vector(384))
+    
+    # Processing metadata
+    processed_at = Column(TIMESTAMP, server_default=func.now())
+    created_at = Column(TIMESTAMP, server_default=func.now())

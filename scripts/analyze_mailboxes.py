@@ -12,7 +12,7 @@ from collections import defaultdict, Counter
 from typing import Dict, List, Tuple, Any
 
 # Add the email-processor directory to the path
-sys.path.insert(0, '../services/email-processor')
+sys.path.insert(0, '../email-processor')
 
 from database import get_db_session
 from models import ImapMailbox, ImapMessage, Message

@@ -40,7 +40,12 @@
       "WebFetch(domain:huggingface.co)",
       "WebFetch(domain:llm.datasette.io)",
       "Bash(python scripts/analyze_classification.py:*)",
-      "Bash(python test:*)"
+      "Bash(python test:*)",
+      "Bash(uv run:*)",
+      "Bash(llm models:*)",
+      "Bash(uv pip install:*)",
+      "Bash(ls:*)",
+      "Bash(DATABASE_URL=\"postgresql://email_user:email_pass@localhost:5433/email_rag\" psql -c \"SELECT COUNT(*) as total_conversations, COUNT(DISTINCT thread_id) as unique_threads FROM conversations;\")"
     ],
     "deny": []
   }

@@ -1,0 +1,39 @@
+# Email RAG System - Unified Dependencies
+# All dependencies for host-based email processing, RAG indexing, and ML inference
+
+# Core database and API dependencies
+sqlalchemy==2.0.35
+psycopg2-binary==2.9.10
+python-dotenv==1.0.1
+pydantic==2.10.0
+pydantic-settings==2.7.0
+requests==2.32.3
+
+# Email processing
+email-reply-parser==0.5.12
+langdetect==1.0.9
+
+# Vector database support
+pgvector>=0.2.0
+
+# RAG and embedding dependencies  
+sentence-transformers>=2.2.0
+torch>=2.0.0
+transformers>=4.21.0
+huggingface-hub>=0.16.0
+numpy>=1.21.0
+
+# Text processing and chunking (replaces Unstructured container)
+unstructured[local-inference]>=0.10.0
+langchain-huggingface>=0.0.3
+
+# Utilities
+tqdm>=4.64.0  # Progress bars for batch processing
+
+# Optional FastAPI if needed for future API endpoints
+fastapi==0.115.0
+uvicorn[standard]==0.32.1
+
+# Development and testing
+pytest>=7.0.0
+pytest-asyncio>=0.21.0

@@ -6,10 +6,10 @@ from sqlalchemy import func
 import logging
 import json
 
-from models import ImapMessage, Message, Contact
+from models import ImapMessage, Message, Contact, MessageChunk
 from database import get_db_session
-from llm_classifier import get_llm_classifier, initialize_llm_classifier
-from threading_service import EmailThreadingService
+from language_classifier import LanguageClassifier
+# Removed: LLM classifier and threading service imports (now run on host)
 
 # We'll import the Rust email parser once it's built
 # from email_parser_py import parse_email_bytes
@@ -21,12 +21,8 @@ class EmailProcessor:
     
     def __init__(self):
         self.reply_parser = EmailReplyParser()
-        self.threading_service = EmailThreadingService()
-        
-        # Initialize LLM classifier (fail fast if not available)
-        logger.info("🤖 Initializing LLM classifier for email processor...")
-        if not initialize_llm_classifier():
-            raise RuntimeError("Failed to initialize LLM classifier. Cannot process emails without working classification.")
+        self.language_classifier = LanguageClassifier()
+        # Removed: Threading service and LLM classifier initialization (now run on host)
     
     def process_unprocessed_emails(self, limit: int = 100) -> int:
         """Process emails that haven't been parsed yet"""
@@ -89,6 +85,12 @@ class EmailProcessor:
             # Clean the email body
             cleaned_body = self._clean_email_body(parsed_email.get('body_text', ''))
             
+            # Classify language
+            language_result = self.language_classifier.classify_email_content(
+                subject=parsed_email.get('subject', ''),
+                body=cleaned_body
+            )
+            
             # Normalize participants and update contacts (in separate transaction)
             participants = self._normalize_participants_safe(parsed_email.get('participants', []))
             
@@ -108,6 +110,8 @@ class EmailProcessor:
                 body_text=cleaned_body,
                 body_html=parsed_email.get('body_html'),
                 participants=participants,
+                language=language_result.get('language_code'),
+                language_confidence=language_result.get('confidence'),
                 parsed_at=datetime.utcnow(),
                 cleaned_at=datetime.utcnow(),
                 processing_status='completed'
@@ -398,167 +402,176 @@ class EmailProcessor:
                 .all()
             )
             
+            # Language distribution
+            language_counts = dict(
+                session.query(Message.language, func.count(Message.id))
+                .group_by(Message.language)
+                .all()
+            )
+            
+            # Language detection stats
+            total_with_language = session.query(func.count(Message.id)).filter(Message.language.isnot(None)).scalar()
+            avg_language_confidence = session.query(func.avg(Message.language_confidence)).filter(Message.language_confidence.isnot(None)).scalar()
+            
             return {
                 'mailbox_filter': target_mailbox,
                 'total_imap_messages': total_imap,
                 'total_processed_messages': total_processed,
                 'pending_messages': pending_in_target,
                 'status_breakdown': status_counts,
-                'processing_rate': f"{total_processed}/{total_imap}" if total_imap > 0 else "0/0"
+                'processing_rate': f"{total_processed}/{total_imap}" if total_imap > 0 else "0/0",
+                'language_distribution': language_counts,
+                'language_detection_rate': f"{total_with_language}/{total_processed}" if total_processed > 0 else "0/0",
+                'avg_language_confidence': round(avg_language_confidence, 3) if avg_language_confidence else None
             }
     
-    def process_unclassified_emails(self, limit: int = 100) -> int:
-        """Process emails that have been cleaned but not classified yet"""
-        classified_count = 0
+    # === RAG INDEXING METHODS ===
+    
+    def process_unembedded_personal_emails(self, limit: int = 10) -> int:
+        """Process personal emails that need RAG indexing"""
+        processed_count = 0
         
         with get_db_session() as session:
-            # Find cleaned but unclassified messages, prioritize most recent first
-            unclassified = session.query(Message).filter(
-                Message.cleaned_at.isnot(None),  # Has been cleaned
-                Message.classified_at.is_(None),  # But not classified
-                Message.processing_status == 'completed'  # Successfully processed
-            ).order_by(Message.date_sent.desc()).limit(limit).all()
+            # Find personal messages that need embedding
+            unembedded = session.query(Message).filter(
+                Message.category == 'personal',
+                Message.embedded_at.is_(None),
+                Message.body_text.isnot(None),
+                Message.body_text != ''
+            ).order_by(Message.processed_at.asc()).limit(limit).all()
             
-            logger.info(f"Found {len(unclassified)} unclassified messages to process")
+            logger.info(f"Found {len(unembedded)} personal emails to embed")
             
-            for message in unclassified:
+            for message in unembedded:
                 try:
-                    if self.classify_single_message(session, message):
-                        classified_count += 1
+                    if self.embed_single_message(session, message):
+                        processed_count += 1
                 except Exception as e:
-                    logger.error(f"Failed to classify message {message.id}: {e}")
-                    # Mark classification as failed
-                    self._mark_classification_failed(session, message.id, str(e))
+                    logger.error(f"Failed to embed message {message.id}: {e}")
         
-        return classified_count
+        return processed_count
     
-    def classify_single_message(self, session: Session, message: Message) -> bool:
-        """Classify a single message using LLM classifier"""
+    def embed_single_message(self, session: Session, message: Message) -> bool:
+        """Generate embeddings for a single message"""
         try:
-            # Get LLM classifier instance
-            classifier = get_llm_classifier()
-            if not classifier.ready:
-                # Fail fast - no fallback allowed per user requirements
-                raise RuntimeError("LLM classifier not ready. Cannot classify without LLM.")
+            # Import RAG dependencies here to avoid startup issues
+            from sentence_transformers import SentenceTransformer
+            import subprocess
+            import tempfile
+            import json
+            import os
             
-            # Classify the email using LLM
-            result = classifier.classify_email(
-                from_email=message.from_email or "",
-                subject=message.subject or "",
-                body=message.body_text or ""
-            )
+            logger.info(f"Embedding message {message.id}: {message.subject[:50]}...")
             
-            # Update message with classification results
-            message.category = result.category
-            message.confidence = result.confidence
-            message.classified_at = datetime.utcnow()
+            # Step 1: Chunk the text using Unstructured container
+            chunks = self._chunk_text_with_unstructured(message.body_text)
+            if not chunks:
+                logger.warning(f"No chunks generated for message {message.id}")
+                # Still mark as embedded to avoid reprocessing
+                message.embedded_at = datetime.utcnow()
+                session.commit()
+                return True
             
-            # Process threading for personal emails
-            if result.category == 'personal':
-                try:
-                    thread_id = self.threading_service.process_message_threading(message, session)
-                    if thread_id:
-                        logger.info(f"Threaded personal message {message.id} into conversation {thread_id}")
-                except Exception as e:
-                    logger.error(f"Threading failed for message {message.id}: {e}")
-                    # Don't fail classification if threading fails
+            # Step 2: Generate embeddings
+            model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+            chunk_texts = [chunk['text'] for chunk in chunks]
+            embeddings = model.encode(chunk_texts, convert_to_tensor=False)
             
+            # Step 3: Store chunks and embeddings
+            chunk_records = []
+            for chunk, embedding in zip(chunks, embeddings):
+                chunk_record = MessageChunk(
+                    message_id=message.id,
+                    chunk_index=chunk['chunk_index'],
+                    text_content=chunk['text'],
+                    element_type=chunk.get('element_type', 'NarrativeText'),
+                    chunk_metadata=chunk.get('metadata', {}),
+                    embedding=embedding.tolist()
+                )
+                chunk_records.append(chunk_record)
+            
+            session.add_all(chunk_records)
+            
+            # Update message embedded_at timestamp
+            message.embedded_at = datetime.utcnow()
             session.commit()
             
-            logger.info(f"Classified message {message.id}: {result.category} (confidence: {result.confidence:.2f})")
+            logger.info(f"Stored {len(chunk_records)} chunks for message {message.id}")
             return True
             
         except Exception as e:
-            logger.error(f"Error classifying message {message.id}: {e}")
+            logger.error(f"Failed to embed message {message.id}: {e}")
             session.rollback()
             return False
     
-    def classify_batch_messages(self, messages: List[Message]) -> int:
-        """Classify multiple messages efficiently using LLM"""
-        if not messages:
-            return 0
+    def _chunk_text_with_unstructured(self, text: str) -> List[Dict]:
+        """Process text with Unstructured library directly (no Docker)"""
+        if not text or not text.strip():
+            return []
         
         try:
-            classifier = get_llm_classifier()
-            if not classifier.ready:
-                # Fail fast - no fallback allowed per user requirements
-                raise RuntimeError("LLM classifier not ready. Cannot classify without LLM.")
+            # Import Unstructured libraries directly
+            from unstructured.partition.text import partition_text
+            from unstructured.chunking.basic import chunk_elements
             
-            classified_count = 0
-            
-            # Process each message individually (LLM doesn't have batch support yet)
-            with get_db_session() as session:
-                for message in messages:
-                    try:
-                        # Refresh message in session
-                        session.merge(message)
-                        
-                        # Classify using LLM
-                        result = classifier.classify_email(
-                            from_email=message.from_email or "",
-                            subject=message.subject or "",
-                            body=message.body_text or ""
-                        )
-                        
-                        message.category = result.category
-                        message.confidence = result.confidence
-                        message.classified_at = datetime.utcnow()
-                        
-                        classified_count += 1
-                        
-                    except Exception as e:
-                        logger.error(f"Failed to classify message {message.id} with LLM: {e}")
-                        raise  # Fail fast per user requirements
-                
-                session.commit()
-            
-            logger.info(f"LLM classified {classified_count}/{len(messages)} messages")
-            return classified_count
-            
-        except Exception as e:
-            logger.error(f"LLM batch classification failed: {e}")
-            raise  # Fail fast per user requirements
-    
-    def _mark_classification_failed(self, session: Session, message_id: int, error: str):
-        """Mark a message as failed classification - NO FALLBACK per user requirements"""
-        # Per user requirements: "DELETE the fallback code" and "We should not swallow the error either"
-        logger.error(f"Classification failed for message {message_id}: {error}")
-        raise RuntimeError(f"Classification failed for message {message_id}: {error}")
-    
-    def get_classification_stats(self) -> Dict[str, Any]:
-        """Get classification statistics"""
-        with get_db_session() as session:
-            # Count messages by classification status
-            total_cleaned = session.query(func.count(Message.id)).filter(
-                Message.cleaned_at.isnot(None)
-            ).scalar()
-            
-            total_classified = session.query(func.count(Message.id)).filter(
-                Message.classified_at.isnot(None)
-            ).scalar()
-            
-            pending_classification = total_cleaned - total_classified
-            
-            # Count by category
-            category_counts = dict(
-                session.query(Message.category, func.count(Message.id))
-                .filter(Message.category.isnot(None))
-                .group_by(Message.category)
-                .all()
+            # Process the text directly 
+            elements = partition_text(text=text)
+            chunks = chunk_elements(
+                elements, 
+                max_characters=1000,
+                overlap=200
             )
             
+            # Convert to JSON serializable format
+            result = []
+            for i, chunk in enumerate(chunks):
+                result.append({
+                    "text": str(chunk),
+                    "element_type": chunk.category if hasattr(chunk, 'category') else 'NarrativeText',
+                    "metadata": chunk.metadata.to_dict() if hasattr(chunk, 'metadata') and chunk.metadata else {},
+                    "chunk_index": i
+                })
+            
+            logger.debug(f"Generated {len(result)} chunks from {len(text)} characters")
+            return result
+            
+        except ImportError as e:
+            logger.error(f"Unstructured library not available: {e}")
+            logger.error("Install with: uv add 'unstructured[local-inference]'")
+            return []
+        except Exception as e:
+            logger.error(f"Unstructured processing failed: {e}")
+            return []
+    
+    def get_rag_stats(self) -> Dict[str, Any]:
+        """Get RAG indexing statistics"""
+        with get_db_session() as session:
+            total_personal = session.query(func.count(Message.id)).filter(
+                Message.category == 'personal'
+            ).scalar()
+            
+            embedded = session.query(func.count(Message.id)).filter(
+                Message.category == 'personal',
+                Message.embedded_at.isnot(None)
+            ).scalar()
+            
+            pending = total_personal - embedded
+            
+            total_chunks = session.query(func.count(MessageChunk.id)).scalar()
+            
             return {
-                'total_cleaned_messages': total_cleaned,
-                'total_classified_messages': total_classified,
-                'pending_classification': pending_classification,
-                'category_breakdown': category_counts,
-                'classification_rate': f"{total_classified}/{total_cleaned}" if total_cleaned > 0 else "0/0"
+                'total_personal_messages': total_personal,
+                'embedded_messages': embedded,
+                'pending_embedding': pending,
+                'total_chunks': total_chunks,
+                'embedding_rate': f"{embedded}/{total_personal}" if total_personal > 0 else "0/0"
             }
     
-    def process_unthreaded_personal_emails(self, limit: int = 100) -> int:
-        """Process threading for personal emails that haven't been threaded yet"""
-        return self.threading_service.process_unthreaded_personal_messages(limit)
-    
-    def get_threading_stats(self) -> Dict[str, Any]:
-        """Get threading statistics"""
-        return self.threading_service.get_threading_stats()
+    # Removed: All classification and threading methods (now run on host)
+    # - process_unclassified_emails()
+    # - classify_single_message()
+    # - classify_batch_messages()
+    # - _mark_classification_failed()
+    # - get_classification_stats()
+    # - process_unthreaded_personal_emails()
+    # - get_threading_stats()
