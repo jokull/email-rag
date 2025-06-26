@@ -59,6 +59,7 @@ class EmailSummarizer:
         """Call LLM using llm library directly with reasoning suppression"""
         try:
             import llm
+            import signal
             
             if self.model is None:
                 self.model = llm.get_model(self.model_id)
@@ -66,8 +67,26 @@ class EmailSummarizer:
             # Add instruction to suppress reasoning
             enhanced_prompt = f"Answer directly without showing your thinking process.\n\n{prompt}"
             
-            response = self.model.prompt(enhanced_prompt)
-            raw_text = response.text().strip()
+            # Set up timeout handler for LLM calls
+            def timeout_handler(signum, frame):
+                raise TimeoutError("LLM call timed out")
+            
+            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            
+            try:
+                # Set 30 second timeout for LLM calls
+                signal.alarm(30)
+                response = self.model.prompt(enhanced_prompt)
+                raw_text = response.text().strip()
+                signal.alarm(0)  # Cancel timeout
+            except KeyboardInterrupt:
+                signal.alarm(0)  # Cancel timeout
+                raise KeyboardInterrupt("LLM call interrupted by user")
+            except TimeoutError:
+                signal.alarm(0)  # Cancel timeout
+                raise Exception("LLM call timed out after 30 seconds")
+            finally:
+                signal.signal(signal.SIGALRM, old_handler)  # Restore original handler
             
             # Remove reasoning tags for Qwen models (they use <think>...</think>)
             # Handle both closed and unclosed thinking tags
@@ -222,6 +241,10 @@ class EmailThreader:
                 if self.interactive and not self.command_queue.empty():
                     self._handle_command(self.command_queue.get())
 
+                # Check if we should still be running before processing
+                if not self.running:
+                    break
+
                 # Process threading batch
                 processed_count, batch_stats = self._process_threading_batch()
                 self.processed_count += processed_count
@@ -243,7 +266,8 @@ class EmailThreader:
                 self._sleep_with_interrupt_check(self.poll_interval)
 
             except KeyboardInterrupt:
-                print(f"\n{ThreadingOutput.current_time()} │ 🛑 Received interrupt signal, shutting down...")
+                print(f"\n{ThreadingOutput.current_time()} │ 🛑 Received interrupt signal, shutting down gracefully...")
+                self.running = False
                 break
             except Exception as e:
                 logger.error(f"Error in threading worker loop: {e}")
@@ -303,13 +327,23 @@ class EmailThreader:
             
             if thread_assignments:
                 for thread_id, new_messages in thread_assignments.items():
+                    # Check if we should still be running
+                    if not self.running:
+                        logger.info("Threading worker interrupted during conversation processing")
+                        break
+                        
                     # Update or create conversation record
                     genesis_message = min(new_messages, key=lambda m: m.date_sent or datetime.min)
                     conversation = self._create_or_update_conversation(session, genesis_message, thread_id, len(new_messages))
                     
                     # Generate summary on-demand when thread gets new message(s)
                     if conversation:
-                        summary, summary_success = self._generate_conversation_summary(session, conversation, thread_id)
+                        try:
+                            summary, summary_success = self._generate_conversation_summary(session, conversation, thread_id)
+                        except KeyboardInterrupt:
+                            logger.info("Summary generation interrupted by user")
+                            self.running = False
+                            break
                         
                         if summary_success and summary:
                             # Log the new message(s) added to thread with summary
@@ -519,9 +553,19 @@ class EmailThreader:
             # Generate summary using Qwen
             summary = self.summarizer.summarize_conversation_thread(message_data)
             
-            # Update conversation with summary
+            # Track model information
+            model_info = {
+                "model": self.summarizer.model_id,
+                "version": "2025-06-26",
+                "method": "llm_library",
+                "max_chars": 120,
+                "prompt_version": "v1"
+            }
+            
+            # Update conversation with summary and model info
             conversation.summary = summary
             conversation.summary_generated_at = datetime.now()
+            conversation.summary_model_info = model_info
             
             return summary, True
             
@@ -720,11 +764,9 @@ def main():
 
     logger.info("Email threader starting up...")
 
-    # Environment validation
-    database_url = os.getenv("DATABASE_URL")
-    if not database_url:
-        logger.error("DATABASE_URL environment variable is required")
-        sys.exit(1)
+    # Environment validation (use default if not provided)
+    database_url = os.getenv("DATABASE_URL", "postgresql://email_user:email_pass@localhost:5433/email_rag")
+    logger.info(f"Using database: {database_url.split('@')[1] if '@' in database_url else database_url}")
 
     # Create and run threader
     threader = EmailThreader(interactive=args.interactive, max_conversations=args.max)

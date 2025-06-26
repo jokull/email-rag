@@ -108,6 +108,7 @@ class Conversation(Base):
     # AI-generated summary (updated on each new message)
     summary = Column(Text)  # One-liner summary of the conversation
     key_topics = Column(JSONB, default=list)  # Array of key topics/entities
+    summary_model_info = Column(JSONB, default=dict)  # Tracks model, version, and parameters used for summary
     
     # Processing status
     summary_generated_at = Column(TIMESTAMP)

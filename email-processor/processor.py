@@ -22,7 +22,21 @@ class EmailProcessor:
     def __init__(self):
         self.reply_parser = EmailReplyParser()
         self.language_classifier = LanguageClassifier()
+        self._embedding_model = None  # Lazy load to avoid startup delays
         # Removed: Threading service and LLM classifier initialization (now run on host)
+    
+    def _get_embedding_model(self):
+        """Get cached embedding model, loading if necessary"""
+        if self._embedding_model is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+                logger.info("Loading sentence-transformers model (this may take a moment on first run)")
+                self._embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+                logger.info("Embedding model loaded successfully")
+            except Exception as e:
+                logger.error(f"Failed to load embedding model: {e}")
+                raise
+        return self._embedding_model
     
     def process_unprocessed_emails(self, limit: int = 100) -> int:
         """Process emails that haven't been parsed yet"""
@@ -455,11 +469,14 @@ class EmailProcessor:
         """Generate embeddings for a single message"""
         try:
             # Import RAG dependencies here to avoid startup issues
-            from sentence_transformers import SentenceTransformer
             import subprocess
             import tempfile
             import json
             import os
+            
+            # Ensure message is properly attached to this session
+            if message not in session:
+                message = session.merge(message)
             
             logger.info(f"Embedding message {message.id}: {message.subject[:50]}...")
             
@@ -468,12 +485,12 @@ class EmailProcessor:
             if not chunks:
                 logger.warning(f"No chunks generated for message {message.id}")
                 # Still mark as embedded to avoid reprocessing
-                message.embedded_at = datetime.utcnow()
+                message.embedded_at = datetime.now()
                 session.commit()
                 return True
             
-            # Step 2: Generate embeddings
-            model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+            # Step 2: Generate embeddings using cached model
+            model = self._get_embedding_model()
             chunk_texts = [chunk['text'] for chunk in chunks]
             embeddings = model.encode(chunk_texts, convert_to_tensor=False)
             
@@ -493,7 +510,7 @@ class EmailProcessor:
             session.add_all(chunk_records)
             
             # Update message embedded_at timestamp
-            message.embedded_at = datetime.utcnow()
+            message.embedded_at = datetime.now()
             session.commit()
             
             logger.info(f"Stored {len(chunk_records)} chunks for message {message.id}")

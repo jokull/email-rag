@@ -259,37 +259,42 @@ class EmailWorker:
 
     def _process_rag_batch(self) -> tuple[int, dict]:
         """Process a batch of personal emails for RAG indexing with beautiful output"""
-        # Get personal emails to embed
+        # Get personal emails to embed - store IDs only to avoid session issues
         with get_db_session() as session:
-            unembedded = session.query(Message).filter(
+            unembedded_query = session.query(Message.id, Message.from_email).filter(
                 Message.category == 'personal',
                 Message.embedded_at.is_(None),
                 Message.body_text.isnot(None),
                 Message.body_text != ''
             ).order_by(Message.processed_at.asc()).limit(self.batch_size).all()
 
-        if not unembedded:
+        if not unembedded_query:
             return 0, {}
 
         # Print batch header
-        BeautifulOutput.print_batch_header(self.mode, len(unembedded))
+        BeautifulOutput.print_batch_header(self.mode, len(unembedded_query))
 
         batch_start = time.time()
         processed_count = 0
         total_chunks = 0
         total_chars = 0
 
-        for message in unembedded:
+        for message_id, from_email in unembedded_query:
             start_time = time.time()
 
             try:
                 with get_db_session() as session:
-                    success = self.processor.embed_single_message(session, message)
+                    # Reload the message in the new session
+                    message_obj = session.query(Message).filter(Message.id == message_id).first()
+                    if not message_obj:
+                        continue
+                    
+                    success = self.processor.embed_single_message(session, message_obj)
 
                     if success:
                         # Get chunk info
                         from models import MessageChunk
-                        chunks = session.query(MessageChunk).filter(MessageChunk.message_id == message.id).all()
+                        chunks = session.query(MessageChunk).filter(MessageChunk.message_id == message_obj.id).all()
                         chunk_count = len(chunks)
                         chars = sum(len(chunk.text_content) for chunk in chunks)
 
@@ -304,19 +309,20 @@ class EmailWorker:
                     else:
                         result = {'success': False, 'chunks': 0, 'total_chars': 0}
 
-                duration_ms = int((time.time() - start_time) * 1000)
-                BeautifulOutput.print_email_progress(self.mode, message.id, message.from_email, result, duration_ms)
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    BeautifulOutput.print_email_progress(self.mode, message_obj.id, message_obj.from_email, result, duration_ms)
 
             except Exception as e:
-                logger.error(f"Failed to embed message {message.id}: {e}")
+                logger.error(f"Failed to embed message {message_id}: {e}")
                 result = {'success': False, 'chunks': 0, 'total_chars': 0}
                 duration_ms = int((time.time() - start_time) * 1000)
-                BeautifulOutput.print_email_progress(self.mode, message.id, message.from_email, result, duration_ms)
+                # Use stored data for error reporting
+                BeautifulOutput.print_email_progress(self.mode, message_id, from_email, result, duration_ms)
 
         # Print batch summary
         batch_duration = time.time() - batch_start
         batch_stats = {'total_chunks': total_chunks, 'total_chars': total_chars}
-        BeautifulOutput.print_batch_summary(self.mode, processed_count, len(unembedded), batch_duration, batch_stats)
+        BeautifulOutput.print_batch_summary(self.mode, processed_count, len(unembedded_query), batch_duration, batch_stats)
 
         return processed_count, batch_stats
 
@@ -455,11 +461,9 @@ def main():
 
     logger.info(f"Email worker starting up in {args.mode} mode...")
 
-    # Environment validation
-    database_url = os.getenv("DATABASE_URL")
-    if not database_url:
-        logger.error("DATABASE_URL environment variable is required")
-        sys.exit(1)
+    # Environment validation (use default if not provided)
+    database_url = os.getenv("DATABASE_URL", "postgresql://email_user:email_pass@localhost:5433/email_rag")
+    logger.info(f"Using database: {database_url.split('@')[1] if '@' in database_url else database_url}")
 
     # Create and run worker
     worker = EmailWorker(mode=args.mode, interactive=args.interactive)
